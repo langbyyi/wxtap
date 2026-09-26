@@ -1,0 +1,42 @@
+WxTap
+Copyright (c) 2026 langbyyi
+
+本仓库以 MIT License 发布（全文见 LICENSE）。**以下内容例外**，它不是本项目的
+原创作品，按来源项目自身的许可条款使用：
+
+## Frida 地址表（`resources/frida/config/`）
+
+`resources/frida/config/win/addresses.<build>.json` 与
+`resources/frida/config/mac/addresses.<build>.json` 是 WMPF 宿主进程内偏移量
+数据。它们取自第三方项目 **evi0s/WMPFDebugger**
+（<https://github.com/evi0s/WMPFDebugger>），该项目以 **GPL-2.0** 发布。
+
+其中来源关系被明确记录在案的是两张 Windows 表（`addresses.25710.json`、
+`addresses.25715.json`）与 macOS 表（`addresses.269136.json`）；`docs/PLATFORM.md`
+说明这两代结构布局的补表方式同样是「照抄上游同构建的表」，因此该目录下的
+数据整体应视为来自上游。
+
+这些文件以**数据**形式随本仓库分发，本项目未派生上游的代码。GPL-2.0 对再分发
+数据的要求（保留许可声明、提供对应源码等）由再分发者自行确认——本文件只做
+来源披露，不构成法律意见。
+
+`resources/frida/hook.js` 与 `resources/frida/autodetect/win.js` 是本项目的代码，
+不在上述例外内。
+
+关于 `hook.js` 需要更准确的说明：它**在结构上参照了上游的 `frida/hook.js`**
+（GPL-2.0）——入口函数名（`getMainModule` / `parseConfig` / `patchCDPFilter` /
+`main`）、`@@CONFIG@@` 注入协议、兜底测试配置里的版本号与偏移常量，以及
+`Interceptor.attach` / `onEnter` / `onLeave` 这类 Frida 惯用写法与上游同源；
+本项目的扩展（`Arch` 架构选择与休眠策略、远程调试开关与 WebSocket 地址写入、
+场景白名单、按运行平台分派模块名等）为原创。逐行比对结果：非平凡行中与上游
+逐字相同的约 19 行，且全部是偏移数据值与 Frida/JS 惯用 API 调用，没有成块照抄。
+`autodetect/win.js` 与上游同名脚本除消息协议名（`wmpf-offsets`）与一行平凡守卫
+外无重合，扫描实现为本项目自行分析 25560 镜像所得。
+
+上述对 `hook.js` 的判断涉及派生作品的界定，**本文件只做来源披露，不构成法律意见**；
+以 GPL-2.0 分发时的义务由再分发者自行确认。
+
+## 其他
+
+`resources/devtools_electron.js` 启动的 DevTools 前端来自 Electron 自带的
+`devtools://` 副本，不随本仓库分发（早期版本曾随仓库携带一份，已于 2026-09 删除）。

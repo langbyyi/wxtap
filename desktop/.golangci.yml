@@ -1,0 +1,44 @@
+version: "2"
+
+run:
+  timeout: 5m
+
+linters:
+  default: standard
+  enable:
+    - bodyclose
+    - copyloopvar
+    - gosec
+    - misspell
+  exclusions:
+    rules:
+      # Tests intentionally use throwaway fixtures and loopback servers; the
+      # security rules below target production ingress, not fixtures.
+      - path: _test\.go
+        linters:
+          - gosec
+          - errcheck
+      # WxTap reads and writes operator-selected paths by design (wxapkg
+      # imports, code browsing, scan reports, update downloads). The path is
+      # the feature, not an injection vector.
+      - linters:
+          - gosec
+        text: "G304"
+      # The shell launches the bundled Node runtime and the operator-configured
+      # Electron binary; subprocess arguments mirror the operator-facing tool surface.
+      - linters:
+          - gosec
+        text: "G204"
+      # showFatalMessage hands two UTF-16 buffers to a Win32 DLL proc through
+      # unsafe.Pointer — the documented way to call Win32 from Go without cgo,
+      # and the only way to report a startup failure from a -H windowsgui
+      # binary, which has no console to print to. Both buffers are locals
+      # converted in the same function, so they stay alive across the call.
+      #
+      # Scoped to this file and this rule: the file is behind a windows build
+      # tag, so it is only analyzed on the Windows leg of the CI matrix, where
+      # an unscoped G103 would otherwise make that leg red on its own.
+      - path: process_windows\.go
+        linters:
+          - gosec
+        text: "G103"

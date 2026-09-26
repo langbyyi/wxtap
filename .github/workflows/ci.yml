@@ -1,0 +1,356 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# A new push supersedes the run it replaced: nothing downstream consumes a
+# stale result, and the desktop matrix is the expensive part.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  scripts:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: shell syntax
+        run: bash -n scripts/build-wails.sh
+
+  core:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: core
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: core/package-lock.json
+      - run: npm ci
+      - run: npm run lint
+      - run: npm run typecheck
+      # dist/ is a gitignored build artifact: build before the dist gate.
+      - run: npm run build
+      - run: npm test
+      - run: npm run coverage
+      # The desktop leg drives this bundle through the Go client; sharing the
+      # artifact keeps the Core build in one job.
+      - uses: actions/upload-artifact@v4
+        with:
+          name: core-dist
+          path: core/dist
+          retention-days: 1
+
+  frontend:
+    # The release checklist runs this suite by hand, which is how a test file
+    # whose syntax had broken stayed broken without failing anything: `vite
+    # build` only bundles what the entry point imports, so a broken *_test.ts is
+    # invisible to the release build.
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: desktop/frontend
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: desktop/frontend/package-lock.json
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm test
+
+  desktop:
+    # Consumes the core job's dist artifact for the real-bundle contract test.
+    # macOS is in the matrix because it is a delivery target: the bundle probes,
+    # the update layout and the data-directory rules all branch on GOOS, and
+    # until now nothing but a Linux cross-compile touched that code.
+    #
+    # The macOS leg used to be gated to merges to main because macOS runners
+    # bill at 10x minutes on a private repository. This repository is public,
+    # where macOS minutes are free, so the gate (and the reason for it) is gone:
+    # every pull request now exercises the delivery target it changes.
+    needs: core
+    strategy:
+      # One leg failing must not cancel the others. The default fail-fast
+      # reports the first OS to break and hides the rest, which is how a
+      # Windows-only test suite stayed invisible: the Linux leg failed on an
+      # unrelated lint toolchain skew and every other leg was cancelled before
+      # its tests ever ran.
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        working-directory: desktop
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: desktop/go.mod
+      # The non-Windows legs run the real Core bundle through the Go client, so
+      # they need the artifact plus a Node runtime.
+      - uses: actions/download-artifact@v4
+        if: runner.os != 'Windows'
+        with:
+          name: core-dist
+          path: core/dist
+      - uses: actions/setup-node@v4
+        if: runner.os != 'Windows'
+        with:
+          node-version: 22
+      # main.go embeds frontend/dist, which is a build artifact and therefore
+      # absent on a fresh checkout. The desktop job tests Go code only, so a
+      # stub keeps `go build`/`go vet`/`go test` compiling; the real frontend
+      # is produced by the build scripts.
+      - name: stub embedded frontend
+        shell: bash
+        run: mkdir -p frontend/dist && printf '<!doctype html><title>ci stub</title>\n' > frontend/dist/index.html
+      - name: gofmt
+        shell: bash
+        run: test -z "$(gofmt -l .)" || (gofmt -l . && exit 1)
+      - uses: golangci/golangci-lint-action@v7
+        with:
+          version: v2.5.0
+          working-directory: desktop
+      - run: go vet ./...
+      - run: go test ./...
+      # Race detection needs cgo/GCC, so it runs only on the Linux leg; the
+      # Windows leg covers the same suite without instrumentation.
+      - name: go test -race
+        if: runner.os == 'Linux'
+        run: go test -race ./...
+      # macOS is a supported target: the bundle script and the darwin probes
+      # have tests, but only a real cross-build catches a Windows/Linux-only
+      # API creeping into shared code.
+      #
+      # go vet as well as go build: go build does not compile _test.go, so a
+      # Windows-only syscall field (syscall.SysProcAttr.HideWindow) hidden
+      # behind a runtime.GOOS guard in a test file passed this gate while
+      # `go test ./...` failed to compile on the macOS leg. vet type-checks
+      # tests too, so it catches that class on every PR instead of relying on
+      # the 10x-billed macOS runner.
+      - name: darwin cross-build
+        if: runner.os == 'Linux'
+        run: |
+          GOOS=darwin GOARCH=arm64 go build ./...
+          GOOS=darwin GOARCH=amd64 go build ./...
+          GOOS=darwin GOARCH=arm64 go vet ./...
+      # build-wails.ps1 stages the Windows release; package-release.ps1 shards
+      # it for the update channel (and runs on the darwin leg too). Parse both
+      # so a syntax error cannot ship silently (bash -n covers the macOS script
+      # in the scripts job).
+      - name: parse Windows build scripts
+        if: runner.os == 'Windows'
+        shell: pwsh
+        working-directory: ${{ github.workspace }}
+        run: |
+          foreach ($name in @('scripts/build-wails.ps1', 'scripts/package-release.ps1')) {
+            $path = (Resolve-Path $name).Path
+            $errors = $null
+            [System.Management.Automation.Language.Parser]::ParseFile($path, [ref]$null, [ref]$errors) | Out-Null
+            Write-Host "$name : $($errors.Count) syntax errors"
+            if ($errors.Count -gt 0) { $errors | ForEach-Object { Write-Error $_ }; exit 1 }
+          }
+
+  macos-package:
+    # Runs the macOS release build on a real Mac and publishes nothing.
+    #
+    # Why it exists alongside the release workflow's macos leg, which does the
+    # same build: that leg only runs on a tag, so before this job the packaging
+    # path had no gate at all on the commits that lead up to a release — the
+    # offline gates only parse build-wails.sh (bash -n) and cross-compile the Go
+    # code for darwin, and neither of them runs it. Every push that touches the
+    # script or an asset now finds out on a Mac whether it still produces a
+    # bundle, a payload, a mountable .dmg and an app that starts.
+    #
+    # What it can prove, and what it cannot: a GitHub macOS runner is a real
+    # Mac, so it proves the script runs to completion, that the bundle and the
+    # disk image come out well-formed and mountable, that the app starts and
+    # records its startup, and that the bundled frida binding loads on this
+    # architecture. It cannot prove the Frida attach against a real WeChat
+    # desktop client, or that an address table exists for a given WeChat build —
+    # a runner has neither a logged-in WeChat nor the target miniapp. Those two
+    # stay on docs/WECHAT_E2E_CHECKLIST.md, and no amount of CI changes them.
+    #
+    # The artifact is for a maintainer to install on a Mac, not for users:
+    # nothing here reaches a release, and SKIP_MACOS does not affect it.
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: desktop/go.mod
+          cache-dependency-path: desktop/go.sum
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: |
+            core/package-lock.json
+            desktop/frontend/package-lock.json
+
+      # The script builds Core, the frontend, the Wails bundle, the flat update
+      # payload and the disk image. Exit status alone is the first thing that
+      # has never been observed.
+      - name: Build the app, the payload and the disk image
+        run: ./scripts/build-wails.sh
+
+      # Only what a real run can show. The staging itself is already locked
+      # offline by TestMacOSBuildScriptStagesBundleLayout, which reads this
+      # script's text — so these assertions are about the tree a run actually
+      # produced, not a second copy of that contract.
+      - name: The staged bundle and payload must be complete
+        run: |
+          set -euo pipefail
+          app="desktop/build/release/WxTap.app"
+          payload="desktop/build/release-payload"
+          fail=0
+          require() {
+            if [ -e "$1" ]; then
+              echo "  ok      $1"
+            else
+              echo "::error::missing: $1"
+              fail=1
+            fi
+          }
+          echo "bundle entries:"
+          # The two the client's darwin layout calls required, plus the assets
+          # the shell reads from beside the executable.
+          require "$app/Contents/MacOS/WxTap"
+          require "$app/Contents/Resources/core/dist/cli.js"
+          require "$app/Contents/Resources/core/hooks"
+          require "$app/Contents/Resources/core/node_modules/frida/build/frida_binding.node"
+          require "$app/Contents/Resources/resources/frida/config/mac"
+          require "$app/Contents/Resources/migrations"
+          require "$app/Contents/Info.plist"
+          echo "update payload entries:"
+          # package-release.ps1 shards this tree; without it a macOS release
+          # cannot be published at all, so an empty one is a release blocker
+          # rather than a cosmetic gap.
+          require "$payload/WxTap"
+          require "$payload/core/dist/cli.js"
+          require "$payload/resources"
+          require "$payload/migrations"
+          # A bundled Node would mean the staging above picked up the working
+          # tree instead of the production-only stage. The release resolves the
+          # user's own Node (resolveNodeCommand in desktop/app.go).
+          if [ -e "$app/Contents/Resources/runtime" ] || [ -e "$payload/runtime" ]; then
+            echo "::error::a Node runtime was bundled; the release must use the user's own Node"
+            fail=1
+          fi
+          # The native binding has to be a Mach-O for this architecture: a
+          # build that silently staged a host-arch dependency is a bundle that
+          # dies at load on the target Mac.
+          file "$app/Contents/Resources/core/node_modules/frida/build/frida_binding.node"
+          exit $fail
+
+      # hdiutil is the one part of the chain that cannot be exercised anywhere
+      # but macOS, so "the dmg exists" is not the assertion — "it mounts and
+      # holds the app beside the Applications link a user drags from" is.
+      - name: The disk image must mount and hold the app
+        run: |
+          set -euo pipefail
+          dmg="desktop/build/release-dist/WxTap.dmg"
+          test -f "$dmg" || { echo "::error::$dmg was not produced"; exit 1; }
+          ls -l "$dmg"
+          mount_point="$(hdiutil attach "$dmg" -nobrowse -readonly | awk '/\/Volumes\// {print $NF; exit}')"
+          [ -n "$mount_point" ] || { echo "::error::the dmg did not mount"; exit 1; }
+          echo "mounted at $mount_point"
+          ls -la "$mount_point"
+          # Detach even if the assertions below fail, or the runner keeps the
+          # image mounted and a later step's cleanup reports a busy volume.
+          trap 'hdiutil detach "$mount_point" -quiet || true' EXIT
+          test -d "$mount_point/WxTap.app" || { echo "::error::the dmg does not contain WxTap.app"; exit 1; }
+          test -L "$mount_point/Applications" || { echo "::error::the Applications symlink is missing, so installing is not a single drag"; exit 1; }
+          test -x "$mount_point/WxTap.app/Contents/MacOS/WxTap" || { echo "::error::the bundled executable is not executable"; exit 1; }
+
+      # The one macOS-specific failure that would make the whole bundle useless:
+      # the frida binding is a native module, and a payload staged for the wrong
+      # architecture is a Mach-O this Mac cannot load. `file` output does not
+      # prove that — loading it does. Worth having on a runner because the
+      # failure is silent until a user hits it: the app starts, the window
+      # paints, and every attach fails.
+      - name: The bundled native binding must load
+        run: |
+          set -euo pipefail
+          binding="desktop/build/release/WxTap.app/Contents/Resources/core/node_modules/frida/build/frida_binding.node"
+          node -e '
+            const binding = process.argv[1];
+            const mod = { exports: {} };
+            process.dlopen(mod, binding);
+            const names = Object.keys(mod.exports);
+            if (names.length === 0) throw new Error("the binding loaded but exported nothing");
+            console.log("binding loaded:", names.length, "exports, including", names.slice(0, 3).join(", "));
+          ' "$binding"
+
+      # The gap this job exists to close for real: no build of this app has
+      # ever been launched on macOS. The data directory is redirected with
+      # WXTAP_DATA_DIR (userBaseDir in desktop/ipc_bridge.go) so the assertions
+      # read a directory this step owns.
+      #
+      # The executable is started directly rather than through `open`, because
+      # `open` does not inherit this step's environment — and the app resolves
+      # the user's Node from PATH, which setup-node put there.
+      - name: The app must start and open its log
+        run: |
+          set -euo pipefail
+          app="desktop/build/release/WxTap.app/Contents/MacOS/WxTap"
+          data="$RUNNER_TEMP/wxtap-smoke"
+          rm -rf "$data"
+          mkdir -p "$data"
+
+          WXTAP_DATA_DIR="$data" "$app" > "$RUNNER_TEMP/smoke.out" 2>&1 &
+          pid=$!
+          cleanup() { kill "$pid" 2>/dev/null || true; sleep 2; pkill -f 'WxTap.app/Contents/MacOS/WxTap' 2>/dev/null || true; pkill -f 'core/dist/cli.js' 2>/dev/null || true; }
+          trap cleanup EXIT
+
+          # The shell opens its log and records "WxTap 启动" early in startup,
+          # before the window. Waiting for that line rather than for the file's
+          # existence is what makes this an assertion about startup having got
+          # that far: the file is created by openOperationLog a moment earlier,
+          # so cat-ing on first sight reads an empty file and proves nothing.
+          for _ in $(seq 1 45); do
+            if grep -qs "WxTap 启动" "$data"/logs/wxtap-*.log; then break; fi
+            if ! kill -0 "$pid" 2>/dev/null; then break; fi
+            sleep 1
+          done
+
+          log="$(ls "$data"/logs/wxtap-*.log 2>/dev/null | head -1 || true)"
+          exit_status=0
+          if [ -n "$log" ]; then
+            echo "--- log: $log ---"
+            cat "$log"
+          fi
+          if ! grep -qs "WxTap 启动" "$data"/logs/wxtap-*.log; then
+            echo "::error::the app did not record its startup line under $data"
+            exit_status=1
+          fi
+          if kill -0 "$pid" 2>/dev/null; then
+            echo "the app is still running after startup - correct"
+          else
+            echo "::error::the app exited during startup"
+            exit_status=1
+          fi
+          if [ "$exit_status" -ne 0 ]; then
+            echo "--- process output ---"
+            cat "$RUNNER_TEMP/smoke.out" 2>/dev/null || true
+          fi
+          exit "$exit_status"
+
+      # For a maintainer to install on a real Mac. Nothing here reaches a
+      # release: the release workflow's macOS leg runs by default, so nothing
+      # here reaches a release either way.
+      - uses: actions/upload-artifact@v4
+        with:
+          name: macos-dmg
+          path: desktop/build/release-dist/WxTap.dmg
+          if-no-files-found: error
+          retention-days: 7
