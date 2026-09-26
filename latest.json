@@ -1,15 +1,15 @@
 {
-  "version": "v1.0.2",
-  "notes": "MCP：traffic_appids 进默认 lean 工具目录（默认档位的客户端也能枚举库里的小程序来选 appId/appid）。",
+  "version": "v1.0.3",
+  "notes": "MCP：敏感信息扫描改异步受理/轮询——大项目不再被客户端超时饿死；目录 mtime 缓存让重复调用秒回；带 files_done/files_total 进度。修复 gofmt 对齐。",
   "platforms": {
     "darwin-arm64": {
       "assets": [
         {
-          "name": "WxTap-1.0.2-mac.tar.gz",
-          "size": 46461823,
-          "sha256": "27905fda92b938783577573e0ad5ad505ad311a6509b1cfa623f3c19e039cca4",
+          "name": "WxTap-1.0.3-mac.tar.gz",
+          "size": 46459913,
+          "sha256": "5cd32690b530ad633df0eb5705ac41e0c1ab5d05cbb2d50ca93681b0a743ddb5",
           "urls": [
-            "https://github.com/langbyyi/wxtap/releases/download/v1.0.2/WxTap-1.0.2-mac.tar.gz"
+            "https://github.com/langbyyi/wxtap/releases/download/v1.0.3/WxTap-1.0.3-mac.tar.gz"
           ]
         }
       ]
@@ -17,19 +17,19 @@
     "windows-amd64": {
       "assets": [
         {
-          "name": "WxTap-1.0.2-a.tar.gz",
-          "size": 10423532,
-          "sha256": "9fdc5b0dd35da0f782201f3a3cf524a498cdc0bed649c93ed83eacbe527d753b",
+          "name": "WxTap-1.0.3-a.tar.gz",
+          "size": 10427700,
+          "sha256": "de748aae1e3839cbfaf94019a9081eb3da5205362fb3b0247d62a1b2dd5131f6",
           "urls": [
-            "https://github.com/langbyyi/wxtap/releases/download/v1.0.2/WxTap-1.0.2-a.tar.gz"
+            "https://github.com/langbyyi/wxtap/releases/download/v1.0.3/WxTap-1.0.3-a.tar.gz"
           ]
         },
         {
-          "name": "WxTap-1.0.2-b.tar.gz",
-          "size": 46264721,
-          "sha256": "a76847a207a3cc2e798b8e275bc879fdf995d36e840f3ff99e5c3f3e2b2ccb2a",
+          "name": "WxTap-1.0.3-b.tar.gz",
+          "size": 46264777,
+          "sha256": "6531157ffdb1d0d85dae1bedd94d0c48f3991f9871b467b53931def51ce5e9f1",
           "urls": [
-            "https://github.com/langbyyi/wxtap/releases/download/v1.0.2/WxTap-1.0.2-b.tar.gz"
+            "https://github.com/langbyyi/wxtap/releases/download/v1.0.3/WxTap-1.0.3-b.tar.gz"
           ]
         }
       ]
