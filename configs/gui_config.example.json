@@ -1,0 +1,16 @@
+{
+  "theme": "dark",
+  "cdp_port": "31415",
+  "debug_main": false,
+  "debug_frida": false,
+  "electron_path": "",
+  "node_path": "",
+  "extract_packages_dir": "",
+  "extract_custom_patterns": {},
+  "custom_patterns": {},
+  "global_hook_scripts": [],
+  "font_ui": "PingFang SC",
+  "font_ui_size": 12,
+  "font_mono": "Menlo",
+  "font_mono_size": 15
+}

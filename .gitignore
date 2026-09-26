@@ -1,0 +1,49 @@
+# Python leftovers (baseline removed)
+__pycache__/
+*.py[cod]
+.venv/
+*.spec
+
+# Node / frontend
+**/node_modules/
+desktop/frontend/dist/
+desktop/frontend/wailsjs/
+desktop/frontend/package.json.md5
+coverage/
+
+# Build / release
+# `build/*` (not `build/`) so the one Wails source asset below can be tracked:
+# Wails reads the application icon from build/appicon.png and has no wails.json
+# field for it, so ignoring the whole directory silently ships Wails' default
+# icon in every artifact.
+build/*
+dist/
+desktop/build/*
+core/dist/
+desktop/*.exe
+!desktop/build/appicon.png
+
+# Keep intentional frontend packaging notes if any — do not track local DB
+*.sqlite3
+fofamap.sqlite3
+
+# Tooling / worktrees
+.worktrees/
+.superpowers/
+.claude/
+.playwright-mcp/
+.DS_Store
+Thumbs.db
+*.log
+*.tmp
+
+# Editor / OS
+.idea/
+.vscode/
+*.swp
+
+# Local GUI config override (example is tracked)
+configs/gui_config.json
+
+# Stray root lockfile (no root package.json)
+/package-lock.json

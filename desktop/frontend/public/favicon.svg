@@ -1,0 +1,35 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" fill="none">
+  <defs>
+    <linearGradient id="wxtap-tile" x1="28" y1="12" x2="228" y2="248" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#9ec4ff"/>
+      <stop offset="0.45" stop-color="#3d7dff"/>
+      <stop offset="1" stop-color="#0d2f78"/>
+    </linearGradient>
+    <radialGradient id="wxtap-sheen" cx="78" cy="52" r="170" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#ffffff" stop-opacity=".34"/>
+      <stop offset=".62" stop-color="#ffffff" stop-opacity="0"/>
+    </radialGradient>
+    <radialGradient id="wxtap-well" cx="128" cy="112" r="96" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#07111f" stop-opacity=".08"/>
+      <stop offset="1" stop-color="#07111f" stop-opacity=".38"/>
+    </radialGradient>
+  </defs>
+  <rect x="6" y="6" width="244" height="244" rx="58" fill="url(#wxtap-tile)"/>
+  <rect x="6" y="6" width="244" height="244" rx="58" fill="url(#wxtap-sheen)"/>
+  <rect x="18" y="18" width="220" height="220" rx="48" stroke="#f4f8ff" stroke-opacity=".22" stroke-width="3"/>
+  <path stroke="#f4f8ff" stroke-opacity=".28" stroke-width="3" stroke-linecap="round" d="M70 22v16M186 22v16M22 74h16M218 74h16M22 182h16M218 182h16"/>
+  <circle cx="128" cy="124" r="92" fill="url(#wxtap-well)"/>
+  <circle cx="128" cy="124" r="86" stroke="#f4f8ff" stroke-opacity=".82" stroke-width="5"/>
+  <circle cx="128" cy="124" r="62" stroke="#f4f8ff" stroke-opacity=".38" stroke-width="3.5"/>
+  <path stroke="#f4f8ff" stroke-opacity=".9" stroke-width="5" stroke-linecap="round" d="M128 28v14M128 206v14M32 124h14M210 124h14"/>
+  <path stroke="#f4f8ff" stroke-width="5" stroke-linejoin="round" d="M128 72 176 99.5v55L128 182 80 154.5v-55z"/>
+  <path stroke="#3ee0b0" stroke-width="4.5" stroke-linecap="round" d="M108 124h40M128 104v40"/>
+  <circle cx="128" cy="124" r="9" fill="#3ee0b0"/>
+  <circle cx="128" cy="38" r="8" fill="#f4f8ff"/>
+  <circle cx="202" cy="168" r="8" fill="#3ee0b0"/>
+  <circle cx="54" cy="168" r="8" fill="#f4f8ff"/>
+  <path stroke="#f4f8ff" stroke-opacity=".5" stroke-width="3.5" stroke-linecap="round" d="M128 46 164 82M194 162 166 142M62 162 90 142"/>
+  <path stroke="#3ee0b0" stroke-width="6" stroke-linecap="round" d="M36 210c22-2 36-16 46-36"/>
+  <path fill="#3ee0b0" d="M78 168 94 166 82 180z"/>
+  <path stroke="#f4f8ff" stroke-opacity=".88" stroke-width="6" stroke-linecap="round" d="M58 214v-10M78 214v-22M98 214v-8M118 214v-26M138 214v-14M158 214v-28M178 214v-12M198 214v-18"/>
+</svg>

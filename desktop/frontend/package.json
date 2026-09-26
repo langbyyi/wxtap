@@ -1,0 +1,33 @@
+{
+  "name": "wxtap-frontend",
+  "private": true,
+  "version": "1.0.0",
+  "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "build:desktop": "npm run build",
+    "test": "vitest run",
+    "typecheck": "vue-tsc --noEmit",
+    "test:build": "npm run build && node scripts/assert-build.mjs"
+  },
+  "dependencies": {
+    "pinia": "^3.0.3",
+    "vue": "^3.5.18",
+    "vue-router": "^4.5.1"
+  },
+  "devDependencies": {
+    "@pinia/testing": "^1.0.2",
+    "@types/node": "^26.6.2",
+    "@vitejs/plugin-vue": "^6.0.1",
+    "@vue/test-utils": "^2.4.6",
+    "jsdom": "^26.1.0",
+    "typescript": "^5.8.3",
+    "vite": "^7.0.6",
+    "vitest": "^3.2.4",
+    "vue-tsc": "^3.3.11"
+  }
+}

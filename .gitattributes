@@ -1,0 +1,39 @@
+# Line endings are normalized in the repository, and this is not cosmetic.
+#
+# scripts/build-wails.sh was committed with CRLF throughout, so its shebang was
+# really "#!/usr/bin/env bash\r" and the release workflow's macOS leg — which
+# runs ./scripts/build-wails.sh — died with "bad interpreter" before building
+# anything. CI never caught it because the only check on that file is
+# `bash -n`, which parses a CRLF script happily.
+#
+# The working tree had no single convention either: the same extension appeared
+# in both flavours (.ts was 83 CRLF / 19 LF, .go 21 / 133), which is what turned
+# ordinary edits into whole-file diffs and made `gofmt -l .` fail on a Windows
+# checkout for files nobody had touched.
+# The pattern and its attributes have to share a line: split across two lines,
+# "*" becomes a pattern with no attributes and the rule silently does nothing.
+* text=auto eol=lf
+
+# Windows reads these with tools that still expect CRLF, and a Windows editor
+# that rewrites one to LF produces a whole-file diff for a one-line change.
+# Both files carry a UTF-8 BOM, which is content: this does not remove it.
+*.ps1 text eol=crlf
+*.bat text eol=crlf
+*.cmd text eol=crlf
+
+# Binary: never normalized, never diffed or merged as text.
+*.png binary
+*.ico binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.webp binary
+*.woff binary
+*.woff2 binary
+*.ttf binary
+*.node binary
+*.dll binary
+*.exe binary
+*.zip binary
+*.gz binary
+*.sqlite3 binary

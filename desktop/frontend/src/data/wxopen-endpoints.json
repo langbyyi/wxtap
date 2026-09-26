@@ -1,0 +1,1182 @@
+{
+  "endpoints": [
+    {
+      "id": "mini-code-unlimited",
+      "group": "mini",
+      "label": "生成小程序码（不限量）",
+      "category": "小程序码",
+      "summary": "为任意页面路径和 scene 参数生成可扫描的小程序码，用于验证站外直达与页面参数是否受限。",
+      "method": "POST",
+      "path": "/wxa/getwxacodeunlimit",
+      "json_body": true,
+      "returns": "image",
+      "note": "check_path 为 false 时允许页面未发布或不存在（上限 60000 个页面）；page 必须与 app.json 一致且不能带参数，参数走 scene。",
+      "params": [
+        {
+          "id": "scene",
+          "label": "scene",
+          "kind": "string",
+          "required": true,
+          "hint": "最多 32 个可见字符，随码进入页面"
+        },
+        {
+          "id": "page",
+          "label": "page",
+          "kind": "string",
+          "hint": "如 pages/admin/index，不带前导 /、不带参数；留空进首页",
+          "shared": true
+        },
+        {
+          "id": "check_path",
+          "label": "check_path",
+          "kind": "bool",
+          "default": "false"
+        },
+        {
+          "id": "env_version",
+          "label": "env_version",
+          "kind": "string",
+          "hint": "release | trial | develop，默认 release",
+          "shared": true
+        },
+        {
+          "id": "width",
+          "label": "width",
+          "kind": "number",
+          "hint": "280..1280，默认 430",
+          "shared": true
+        }
+      ]
+    },
+    {
+      "id": "mini-code-path",
+      "group": "mini",
+      "label": "生成小程序码（按路径）",
+      "category": "小程序码",
+      "summary": "按已发布页面路径生成小程序码，路径必须存在。",
+      "method": "POST",
+      "path": "/wxa/getwxacode",
+      "json_body": true,
+      "returns": "image",
+      "params": [
+        {
+          "id": "path",
+          "label": "path",
+          "kind": "string",
+          "required": true,
+          "hint": "如 pages/index/index"
+        },
+        {
+          "id": "width",
+          "label": "width",
+          "kind": "number",
+          "shared": true
+        }
+      ]
+    },
+    {
+      "id": "mini-qrcode",
+      "group": "mini",
+      "label": "生成普通二维码",
+      "category": "小程序码",
+      "summary": "生成指向小程序页面的普通二维码。",
+      "method": "POST",
+      "path": "/cgi-bin/wxaapp/createwxaqrcode",
+      "json_body": true,
+      "returns": "image",
+      "params": [
+        {
+          "id": "path",
+          "label": "path",
+          "kind": "string",
+          "required": true
+        },
+        {
+          "id": "width",
+          "label": "width",
+          "kind": "number",
+          "shared": true
+        }
+      ]
+    },
+    {
+      "id": "mini-sec-check",
+      "group": "mini",
+      "label": "内容安全检测",
+      "category": "内容安全",
+      "summary": "提交文本到内容安全接口，确认服务端检测能力与拦截口径。",
+      "method": "POST",
+      "path": "/wxa/msg_sec_check",
+      "json_body": true,
+      "returns": "json",
+      "note": "V2 接口：openid 必填，且该用户需在近两小时内访问过小程序，否则返回 61010。",
+      "params": [
+        {
+          "id": "content",
+          "label": "content",
+          "kind": "string",
+          "required": true
+        },
+        {
+          "id": "version",
+          "label": "version",
+          "kind": "number",
+          "default": "2"
+        },
+        {
+          "id": "scene",
+          "label": "scene",
+          "kind": "number",
+          "hint": "1 资料 2 评论 3 论坛 4 社交日志",
+          "default": "1"
+        },
+        {
+          "id": "openid",
+          "label": "openid",
+          "kind": "string",
+          "required": true,
+          "hint": "近两小时内访问过小程序的用户 openid",
+          "shared": true
+        }
+      ]
+    },
+    {
+      "id": "mini-account-info",
+      "group": "mini",
+      "label": "小程序基本信息",
+      "category": "账号信息",
+      "summary": "读取小程序的名称、主体、类目等账号信息。",
+      "method": "POST",
+      "path": "/cgi-bin/account/getaccountbasicinfo",
+      "json_body": true,
+      "returns": "json"
+    },
+    {
+      "id": "mini-summary-trend",
+      "group": "mini",
+      "label": "每日概况趋势",
+      "category": "数据分析",
+      "summary": "读取核心指标（打开次数、访问人数等）的每日趋势。",
+      "method": "POST",
+      "path": "/datacube/getweanalysisappiddailysummarytrend",
+      "json_body": true,
+      "returns": "json",
+      "params": [
+        {
+          "id": "begin_date",
+          "label": "begin_date",
+          "kind": "string",
+          "required": true,
+          "hint": "20260901 形式，最长 30 天跨度",
+          "shared": true
+        },
+        {
+          "id": "end_date",
+          "label": "end_date",
+          "kind": "string",
+          "required": true,
+          "shared": true
+        }
+      ]
+    },
+    {
+      "id": "mini-visit-page",
+      "group": "mini",
+      "label": "访问页面",
+      "category": "数据分析",
+      "summary": "读取各页面的访问次数与人数，可用于确认后台页面是否被人访问过。",
+      "method": "POST",
+      "path": "/datacube/getweanalysisappidvisitpage",
+      "json_body": true,
+      "returns": "json",
+      "params": [
+        {
+          "id": "begin_date",
+          "label": "begin_date",
+          "kind": "string",
+          "required": true,
+          "shared": true
+        },
+        {
+          "id": "end_date",
+          "label": "end_date",
+          "kind": "string",
+          "required": true,
+          "shared": true
+        }
+      ]
+    },
+    {
+      "id": "mini-daily-trend",
+      "group": "mini",
+      "label": "日访问趋势",
+      "category": "数据分析",
+      "summary": "读取每日打开次数与访问人数趋势。",
+      "method": "POST",
+      "path": "/datacube/getweanalysisappiddailyvisittrend",
+      "json_body": true,
+      "returns": "json",
+      "params": [
+        {
+          "id": "begin_date",
+          "label": "begin_date",
+          "kind": "string",
+          "required": true,
+          "shared": true
+        },
+        {
+          "id": "end_date",
+          "label": "end_date",
+          "kind": "string",
+          "required": true,
+          "shared": true
+        }
+      ]
+    },
+    {
+      "id": "mini-weekly-trend",
+      "group": "mini",
+      "label": "周访问趋势",
+      "category": "数据分析",
+      "summary": "读取每周打开次数与访问人数趋势。",
+      "method": "POST",
+      "path": "/datacube/getweanalysisappidweeklyvisittrend",
+      "json_body": true,
+      "returns": "json",
+      "params": [
+        {
+          "id": "begin_date",
+          "label": "begin_date",
+          "kind": "string",
+          "required": true,
+          "shared": true
+        },
+        {
+          "id": "end_date",
+          "label": "end_date",
+          "kind": "string",
+          "required": true,
+          "shared": true
+        }
+      ]
+    },
+    {
+      "id": "mini-monthly-trend",
+      "group": "mini",
+      "label": "月访问趋势",
+      "category": "数据分析",
+      "summary": "读取每月打开次数与访问人数趋势。",
+      "method": "POST",
+      "path": "/datacube/getweanalysisappidmonthlyvisittrend",
+      "json_body": true,
+      "returns": "json",
+      "params": [
+        {
+          "id": "begin_date",
+          "label": "begin_date",
+          "kind": "string",
+          "required": true,
+          "shared": true
+        },
+        {
+          "id": "end_date",
+          "label": "end_date",
+          "kind": "string",
+          "required": true,
+          "shared": true
+        }
+      ]
+    },
+    {
+      "id": "mini-visit-distribution",
+      "group": "mini",
+      "label": "访问分布",
+      "category": "数据分析",
+      "summary": "读取访问来源与访问时长分布，用于判断入口构成。",
+      "method": "POST",
+      "path": "/datacube/getweanalysisappidvisitdistribution",
+      "json_body": true,
+      "returns": "json",
+      "params": [
+        {
+          "id": "begin_date",
+          "label": "begin_date",
+          "kind": "string",
+          "required": true,
+          "shared": true
+        },
+        {
+          "id": "end_date",
+          "label": "end_date",
+          "kind": "string",
+          "required": true,
+          "shared": true
+        }
+      ]
+    },
+    {
+      "id": "mini-user-portrait",
+      "group": "mini",
+      "label": "用户画像",
+      "category": "数据分析",
+      "summary": "读取访问用户的画像（地域、性别、年龄、终端）。",
+      "method": "POST",
+      "path": "/datacube/getweanalysisappiduserportrait",
+      "json_body": true,
+      "returns": "json",
+      "params": [
+        {
+          "id": "begin_date",
+          "label": "begin_date",
+          "kind": "string",
+          "required": true,
+          "shared": true
+        },
+        {
+          "id": "end_date",
+          "label": "end_date",
+          "kind": "string",
+          "required": true,
+          "shared": true
+        }
+      ]
+    },
+    {
+      "id": "mini-weekly-retain",
+      "group": "mini",
+      "label": "周留存",
+      "category": "数据分析",
+      "summary": "读取新增用户的周留存数据。",
+      "method": "POST",
+      "path": "/datacube/getweanalysisappidweeklyretaininfo",
+      "json_body": true,
+      "returns": "json",
+      "params": [
+        {
+          "id": "begin_date",
+          "label": "begin_date",
+          "kind": "string",
+          "required": true,
+          "shared": true
+        },
+        {
+          "id": "end_date",
+          "label": "end_date",
+          "kind": "string",
+          "required": true,
+          "shared": true
+        }
+      ]
+    },
+    {
+      "id": "mini-monthly-retain",
+      "group": "mini",
+      "label": "月留存",
+      "category": "数据分析",
+      "summary": "读取新增用户的月留存数据。",
+      "method": "POST",
+      "path": "/datacube/getweanalysisappidmonthlyretaininfo",
+      "json_body": true,
+      "returns": "json",
+      "params": [
+        {
+          "id": "begin_date",
+          "label": "begin_date",
+          "kind": "string",
+          "required": true,
+          "shared": true
+        },
+        {
+          "id": "end_date",
+          "label": "end_date",
+          "kind": "string",
+          "required": true,
+          "shared": true
+        }
+      ]
+    },
+    {
+      "id": "mini-media-check",
+      "group": "mini",
+      "label": "图片/音频异步检测",
+      "category": "内容安全",
+      "summary": "提交图片或音频地址做内容安全检测，确认服务端的媒体拦截口径。",
+      "method": "POST",
+      "path": "/wxa/media_check_async",
+      "json_body": true,
+      "returns": "json",
+      "note": "结果是异步的（返回 trace_id）；V2 同样要求 openid 在近两小时内访问过小程序。",
+      "params": [
+        {
+          "id": "media_url",
+          "label": "media_url",
+          "kind": "string",
+          "required": true,
+          "hint": "可公网访问的图片或音频地址"
+        },
+        {
+          "id": "media_type",
+          "label": "media_type",
+          "kind": "number",
+          "required": true,
+          "hint": "1 音频 2 图片",
+          "default": "2"
+        },
+        {
+          "id": "version",
+          "label": "version",
+          "kind": "number",
+          "default": "2"
+        },
+        {
+          "id": "openid",
+          "label": "openid",
+          "kind": "string",
+          "required": true,
+          "shared": true
+        },
+        {
+          "id": "scene",
+          "label": "scene",
+          "kind": "number",
+          "default": "1",
+          "shared": true
+        }
+      ]
+    },
+    {
+      "id": "mini-subscribe-templates",
+      "group": "mini",
+      "label": "订阅消息模板列表",
+      "category": "订阅消息",
+      "summary": "读取小程序已配置的订阅消息模板及其字段。",
+      "method": "GET",
+      "path": "/wxaapi/newtmpl/gettemplate",
+      "json_body": false,
+      "returns": "json"
+    },
+    {
+      "id": "oa-followers",
+      "group": "oa",
+      "label": "关注者 openid 列表",
+      "category": "用户",
+      "summary": "读取公众号关注者 openid，用于确认凭据可触达的用户范围。",
+      "method": "GET",
+      "path": "/cgi-bin/user/get",
+      "json_body": false,
+      "returns": "json",
+      "note": "一次最多返回 10000 个 openid；用返回的 next_openid 继续翻页，total 是关注者总数。",
+      "params": [
+        {
+          "id": "next_openid",
+          "label": "next_openid",
+          "kind": "string",
+          "hint": "留空从第一页开始",
+          "shared": true
+        }
+      ]
+    },
+    {
+      "id": "oa-user-info",
+      "group": "oa",
+      "label": "用户资料",
+      "category": "用户",
+      "summary": "按 openid 读取单个用户资料。",
+      "method": "GET",
+      "path": "/cgi-bin/user/info",
+      "json_body": false,
+      "returns": "json",
+      "params": [
+        {
+          "id": "openid",
+          "label": "openid",
+          "kind": "string",
+          "required": true,
+          "shared": true
+        },
+        {
+          "id": "lang",
+          "label": "lang",
+          "kind": "string",
+          "default": "zh_CN",
+          "shared": true
+        }
+      ]
+    },
+    {
+      "id": "oa-user-batchget",
+      "group": "oa",
+      "label": "批量用户资料",
+      "category": "用户",
+      "summary": "一次提交多个 openid，批量读取用户资料。",
+      "method": "POST",
+      "path": "/cgi-bin/user/info/batchget",
+      "json_body": true,
+      "returns": "json",
+      "params": [
+        {
+          "id": "user_list",
+          "label": "user_list",
+          "kind": "json",
+          "required": true,
+          "hint": "JSON 数组，如 [{\"openid\":\"o1\",\"lang\":\"zh_CN\"}]，最多 100 个"
+        }
+      ]
+    },
+    {
+      "id": "oa-tags",
+      "group": "oa",
+      "label": "标签列表",
+      "category": "用户",
+      "summary": "读取公众号的用户标签及人数。",
+      "method": "GET",
+      "path": "/cgi-bin/tags/get",
+      "json_body": false,
+      "returns": "json"
+    },
+    {
+      "id": "oa-tag-followers",
+      "group": "oa",
+      "label": "标签下关注者",
+      "category": "用户",
+      "summary": "读取某个标签下的 openid 列表。",
+      "method": "POST",
+      "path": "/cgi-bin/user/tag/get",
+      "json_body": true,
+      "returns": "json",
+      "params": [
+        {
+          "id": "tagid",
+          "label": "tagid",
+          "kind": "number",
+          "required": true,
+          "hint": "先用「标签列表」取",
+          "shared": true
+        },
+        {
+          "id": "next_openid",
+          "label": "next_openid",
+          "kind": "string",
+          "shared": true
+        }
+      ]
+    },
+    {
+      "id": "oa-menu",
+      "group": "oa",
+      "label": "自定义菜单",
+      "category": "菜单与素材",
+      "summary": "读取公众号当前自定义菜单配置。",
+      "method": "GET",
+      "path": "/cgi-bin/menu/get",
+      "json_body": false,
+      "returns": "json"
+    },
+    {
+      "id": "oa-material",
+      "group": "oa",
+      "label": "素材列表",
+      "category": "菜单与素材",
+      "summary": "分页读取公众号图文/图片等素材列表。",
+      "method": "POST",
+      "path": "/cgi-bin/material/batchget_material",
+      "json_body": true,
+      "returns": "json",
+      "params": [
+        {
+          "id": "type",
+          "label": "type",
+          "kind": "string",
+          "required": true,
+          "hint": "news | image | voice | video",
+          "default": "news"
+        },
+        {
+          "id": "offset",
+          "label": "offset",
+          "kind": "number",
+          "default": "0",
+          "shared": true
+        },
+        {
+          "id": "count",
+          "label": "count",
+          "kind": "number",
+          "hint": "1..20",
+          "default": "10",
+          "shared": true
+        }
+      ]
+    },
+    {
+      "id": "oa-material-count",
+      "group": "oa",
+      "label": "素材总数",
+      "category": "菜单与素材",
+      "summary": "读取各类素材的数量。",
+      "method": "GET",
+      "path": "/cgi-bin/material/get_materialcount",
+      "json_body": false,
+      "returns": "json"
+    },
+    {
+      "id": "oa-callback-ip",
+      "group": "oa",
+      "label": "微信服务器 IP",
+      "category": "系统信息",
+      "summary": "读取微信回调与接口所用的服务器 IP 段。",
+      "method": "GET",
+      "path": "/cgi-bin/getcallbackip",
+      "json_body": false,
+      "returns": "json"
+    },
+    {
+      "id": "oa-material-get",
+      "group": "oa",
+      "label": "永久素材详情",
+      "category": "菜单与素材",
+      "summary": "按 media_id 读取永久素材内容。",
+      "method": "POST",
+      "path": "/cgi-bin/material/get_material",
+      "json_body": true,
+      "returns": "json",
+      "note": "图文素材返回 JSON，图片/语音素材返回二进制，以最终响应为准。",
+      "params": [
+        {
+          "id": "media_id",
+          "label": "media_id",
+          "kind": "string",
+          "required": true,
+          "hint": "先用「素材列表」取"
+        }
+      ]
+    },
+    {
+      "id": "oa-qrcode-create",
+      "group": "oa",
+      "label": "创建带参二维码",
+      "category": "菜单与素材",
+      "summary": "创建带参数的公众号二维码，用于验证扫码事件与场景值处理。",
+      "method": "POST",
+      "path": "/cgi-bin/qrcode/create",
+      "json_body": true,
+      "returns": "json",
+      "note": "返回 ticket，图片地址是 https://mp.weixin.qq.com/cgi-bin/showqrcode?ticket=<ticket>。",
+      "params": [
+        {
+          "id": "action_name",
+          "label": "action_name",
+          "kind": "string",
+          "required": true,
+          "hint": "QR_STR_SCENE 或 QR_LIMIT_STR_SCENE（永久）"
+        },
+        {
+          "id": "scene_str",
+          "label": "scene_str",
+          "kind": "string",
+          "required": true,
+          "hint": "扫码时带出的场景值"
+        },
+        {
+          "id": "expire_seconds",
+          "label": "expire_seconds",
+          "kind": "number",
+          "hint": "临时码有效期，最长 2592000 秒"
+        }
+      ]
+    },
+    {
+      "id": "oa-selfmenu",
+      "group": "oa",
+      "label": "自定义菜单配置",
+      "category": "菜单与素材",
+      "summary": "读取公众号当前生效的菜单配置（含个性化菜单开关）。",
+      "method": "GET",
+      "path": "/cgi-bin/get_current_selfmenu_info",
+      "json_body": false,
+      "returns": "json"
+    },
+    {
+      "id": "oa-tags-of-user",
+      "group": "oa",
+      "label": "用户身上的标签",
+      "category": "用户",
+      "summary": "读取某个 openid 被打上的标签。",
+      "method": "POST",
+      "path": "/cgi-bin/tags/getidlist",
+      "json_body": true,
+      "returns": "json",
+      "params": [
+        {
+          "id": "openid",
+          "label": "openid",
+          "kind": "string",
+          "required": true,
+          "shared": true
+        }
+      ]
+    },
+    {
+      "id": "oa-shorturl",
+      "group": "oa",
+      "label": "长链接转短链",
+      "category": "系统信息",
+      "summary": "把长链接转成短链，用于核对短链跳转与统计参数。",
+      "method": "POST",
+      "path": "/cgi-bin/shorturl",
+      "json_body": true,
+      "returns": "json",
+      "params": [
+        {
+          "id": "action",
+          "label": "action",
+          "kind": "string",
+          "default": "long2short"
+        },
+        {
+          "id": "long_url",
+          "label": "long_url",
+          "kind": "string",
+          "required": true
+        }
+      ]
+    },
+    {
+      "id": "oa-quota-get",
+      "group": "oa",
+      "label": "接口调用配额",
+      "category": "系统信息",
+      "summary": "查询某个接口当天的调用上限与已用次数，用来看清这套凭据还能发多少请求。",
+      "method": "POST",
+      "path": "/cgi-bin/openapi/quota/get",
+      "json_body": true,
+      "returns": "json",
+      "params": [
+        {
+          "id": "cgi_path",
+          "label": "cgi_path",
+          "kind": "string",
+          "required": true,
+          "hint": "如 /cgi-bin/user/get"
+        }
+      ]
+    },
+    {
+      "id": "oa-rid-get",
+      "group": "oa",
+      "label": "接口错误详情",
+      "category": "系统信息",
+      "summary": "按 rid 读取某次调用的详细错误信息。",
+      "method": "POST",
+      "path": "/cgi-bin/openapi/rid/get",
+      "json_body": true,
+      "returns": "json",
+      "params": [
+        {
+          "id": "rid",
+          "label": "rid",
+          "kind": "string",
+          "required": true,
+          "hint": "错误响应里的 rid"
+        }
+      ]
+    },
+    {
+      "id": "oa-freepublish-batchget",
+      "group": "oa",
+      "label": "已发布文章列表",
+      "category": "发布与草稿",
+      "summary": "分页读取公众号已发布的文章。",
+      "method": "POST",
+      "path": "/cgi-bin/freepublish/batchget",
+      "json_body": true,
+      "returns": "json",
+      "params": [
+        {
+          "id": "offset",
+          "label": "offset",
+          "kind": "number",
+          "default": "0",
+          "shared": true
+        },
+        {
+          "id": "count",
+          "label": "count",
+          "kind": "number",
+          "hint": "1..20",
+          "default": "10",
+          "shared": true
+        },
+        {
+          "id": "no_content",
+          "label": "no_content",
+          "kind": "number",
+          "hint": "1 不返回正文",
+          "default": "1",
+          "shared": true
+        }
+      ]
+    },
+    {
+      "id": "oa-draft-batchget",
+      "group": "oa",
+      "label": "草稿箱列表",
+      "category": "发布与草稿",
+      "summary": "分页读取公众号草稿箱。",
+      "method": "POST",
+      "path": "/cgi-bin/draft/batchget",
+      "json_body": true,
+      "returns": "json",
+      "params": [
+        {
+          "id": "offset",
+          "label": "offset",
+          "kind": "number",
+          "default": "0",
+          "shared": true
+        },
+        {
+          "id": "count",
+          "label": "count",
+          "kind": "number",
+          "hint": "1..20",
+          "default": "10",
+          "shared": true
+        },
+        {
+          "id": "no_content",
+          "label": "no_content",
+          "kind": "number",
+          "default": "1",
+          "shared": true
+        }
+      ]
+    },
+    {
+      "id": "oa-draft-count",
+      "group": "oa",
+      "label": "草稿总数",
+      "category": "发布与草稿",
+      "summary": "读取草稿箱中的图文数量。",
+      "method": "GET",
+      "path": "/cgi-bin/draft/count",
+      "json_body": false,
+      "returns": "json"
+    },
+    {
+      "id": "oa-user-summary",
+      "group": "oa",
+      "label": "用户增减数据",
+      "category": "数据分析",
+      "summary": "读取每日新增与取消关注的用户数。",
+      "method": "POST",
+      "path": "/datacube/getusersummary",
+      "json_body": true,
+      "returns": "json",
+      "params": [
+        {
+          "id": "begin_date",
+          "label": "begin_date",
+          "kind": "string",
+          "required": true,
+          "shared": true
+        },
+        {
+          "id": "end_date",
+          "label": "end_date",
+          "kind": "string",
+          "required": true,
+          "shared": true
+        }
+      ]
+    },
+    {
+      "id": "oa-user-cumulate",
+      "group": "oa",
+      "label": "累计用户数据",
+      "category": "数据分析",
+      "summary": "读取每日累计关注人数。",
+      "method": "POST",
+      "path": "/datacube/getusercumulate",
+      "json_body": true,
+      "returns": "json",
+      "params": [
+        {
+          "id": "begin_date",
+          "label": "begin_date",
+          "kind": "string",
+          "required": true,
+          "shared": true
+        },
+        {
+          "id": "end_date",
+          "label": "end_date",
+          "kind": "string",
+          "required": true,
+          "shared": true
+        }
+      ]
+    },
+    {
+      "id": "oa-article-summary",
+      "group": "oa",
+      "label": "图文群发每日数据",
+      "category": "数据分析",
+      "summary": "读取群发图文的送达与阅读数据。",
+      "method": "POST",
+      "path": "/datacube/getarticlesummary",
+      "json_body": true,
+      "returns": "json",
+      "params": [
+        {
+          "id": "begin_date",
+          "label": "begin_date",
+          "kind": "string",
+          "required": true,
+          "shared": true
+        },
+        {
+          "id": "end_date",
+          "label": "end_date",
+          "kind": "string",
+          "required": true,
+          "shared": true
+        }
+      ]
+    },
+    {
+      "id": "oa-article-total",
+      "group": "oa",
+      "label": "图文群发总数据",
+      "category": "数据分析",
+      "summary": "读取单篇图文从群发至今的累计数据。",
+      "method": "POST",
+      "path": "/datacube/getarticletotal",
+      "json_body": true,
+      "returns": "json",
+      "params": [
+        {
+          "id": "begin_date",
+          "label": "begin_date",
+          "kind": "string",
+          "required": true,
+          "shared": true
+        },
+        {
+          "id": "end_date",
+          "label": "end_date",
+          "kind": "string",
+          "required": true,
+          "shared": true
+        }
+      ]
+    },
+    {
+      "id": "work-user-list",
+      "group": "work",
+      "label": "部门成员",
+      "category": "通讯录",
+      "summary": "读取指定部门的成员列表，确认凭据可见的组织范围。",
+      "method": "GET",
+      "path": "/cgi-bin/user/simplelist",
+      "json_body": false,
+      "returns": "json",
+      "note": "只返回该部门本身，不含子部门；要递归需先取「部门列表」，再逐层调用。",
+      "params": [
+        {
+          "id": "department_id",
+          "label": "department_id",
+          "kind": "string",
+          "required": true,
+          "default": "1",
+          "shared": true
+        }
+      ]
+    },
+    {
+      "id": "work-user-list-detail",
+      "group": "work",
+      "label": "部门成员详情",
+      "category": "通讯录",
+      "summary": "读取部门成员的完整资料（手机号、邮箱等，取决于权限）。",
+      "method": "GET",
+      "path": "/cgi-bin/user/list",
+      "json_body": false,
+      "returns": "json",
+      "params": [
+        {
+          "id": "department_id",
+          "label": "department_id",
+          "kind": "string",
+          "required": true,
+          "shared": true
+        },
+        {
+          "id": "fetch_child",
+          "label": "fetch_child",
+          "kind": "string",
+          "hint": "1 递归子部门",
+          "default": "1"
+        }
+      ]
+    },
+    {
+      "id": "work-user-get",
+      "group": "work",
+      "label": "读取成员",
+      "category": "通讯录",
+      "summary": "按 userid 读取单个成员的资料。",
+      "method": "GET",
+      "path": "/cgi-bin/user/get",
+      "json_body": false,
+      "returns": "json",
+      "params": [
+        {
+          "id": "userid",
+          "label": "userid",
+          "kind": "string",
+          "required": true,
+          "hint": "先用「部门成员」取",
+          "shared": true
+        }
+      ]
+    },
+    {
+      "id": "work-department-list",
+      "group": "work",
+      "label": "部门列表",
+      "category": "通讯录",
+      "summary": "读取企业微信部门树。",
+      "method": "GET",
+      "path": "/cgi-bin/department/list",
+      "json_body": false,
+      "returns": "json",
+      "params": [
+        {
+          "id": "id",
+          "label": "id",
+          "kind": "string",
+          "hint": "留空取全部部门",
+          "shared": true
+        }
+      ]
+    },
+    {
+      "id": "work-department-get",
+      "group": "work",
+      "label": "单个部门",
+      "category": "通讯录",
+      "summary": "按部门 id 读取单个部门详情。",
+      "method": "GET",
+      "path": "/cgi-bin/department/get",
+      "json_body": false,
+      "returns": "json",
+      "params": [
+        {
+          "id": "id",
+          "label": "id",
+          "kind": "string",
+          "required": true,
+          "shared": true
+        }
+      ]
+    },
+    {
+      "id": "work-tag-list",
+      "group": "work",
+      "label": "标签列表",
+      "category": "通讯录",
+      "summary": "读取企业微信的标签列表。",
+      "method": "GET",
+      "path": "/cgi-bin/tag/list",
+      "json_body": false,
+      "returns": "json"
+    },
+    {
+      "id": "work-agent-get",
+      "group": "work",
+      "label": "读取应用",
+      "category": "应用",
+      "summary": "按 agentid 读取自建应用的信息与可见范围。",
+      "method": "GET",
+      "path": "/cgi-bin/agent/get",
+      "json_body": false,
+      "returns": "json",
+      "params": [
+        {
+          "id": "agentid",
+          "label": "agentid",
+          "kind": "string",
+          "required": true,
+          "shared": true
+        }
+      ]
+    },
+    {
+      "id": "work-api-ip",
+      "group": "work",
+      "label": "接口 IP 段",
+      "category": "系统信息",
+      "summary": "读取企业微信接口的 IP 段。",
+      "method": "GET",
+      "path": "/cgi-bin/get_api_domain_ip",
+      "json_body": false,
+      "returns": "json"
+    },
+    {
+      "id": "work-department-simplelist",
+      "group": "work",
+      "label": "子部门列表",
+      "category": "通讯录",
+      "summary": "读取某个部门下的直接子部门，用于逐层展开部门树。",
+      "method": "GET",
+      "path": "/cgi-bin/department/simplelist",
+      "json_body": false,
+      "returns": "json",
+      "params": [
+        {
+          "id": "id",
+          "label": "id",
+          "kind": "string",
+          "hint": "留空取全部部门",
+          "shared": true
+        }
+      ]
+    },
+    {
+      "id": "work-tag-members",
+      "group": "work",
+      "label": "标签成员",
+      "category": "通讯录",
+      "summary": "读取某个标签下的成员与部门。",
+      "method": "GET",
+      "path": "/cgi-bin/tag/get",
+      "json_body": false,
+      "returns": "json",
+      "params": [
+        {
+          "id": "tagid",
+          "label": "tagid",
+          "kind": "string",
+          "required": true,
+          "hint": "先用「标签列表」取",
+          "shared": true
+        }
+      ]
+    }
+  ],
+  "groups": [
+    {
+      "id": "mini",
+      "label": "微信小程序"
+    },
+    {
+      "id": "oa",
+      "label": "微信公众号"
+    },
+    {
+      "id": "work",
+      "label": "企业微信"
+    }
+  ]
+}

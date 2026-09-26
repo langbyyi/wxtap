@@ -1,0 +1,342 @@
+name: release
+
+# Builds the two things users obtain and the two things the updater consumes,
+# for every platform, and publishes them together:
+#
+#   Windows  WxTap-setup.exe        one file a new user downloads and runs
+#            WxTap-<v>-a/b.tar.gz   the update payload's shards
+#   macOS    WxTap.dmg              one file a new user downloads and opens
+#            WxTap-<v>-mac.tar.gz   the update payload's shard
+#   both     latest.json            the manifest the client reads, committed to
+#                                   the default branch at its fixed address
+#            feedback.md            what the in-app feedback page renders,
+#                                   committed next to the manifest (docs/FEEDBACK.md)
+#
+# macOS is published, and its job runs **by default**. A release can drop it by
+# setting the repository variable SKIP_MACOS to "true"; nothing needs to be set
+# for the normal case. Gating it the other way round — off unless a variable
+# says otherwise — makes whether a platform ships an invisible piece of
+# repository state, which a fork, a settings reset or an unread README silently
+# turns into a release with no macOS build in it.
+#
+# What is and is not verified is in docs/RELEASE.md §三. Briefly: ci.yml's
+# macos-package leg verifies the packaging on a real Mac (build, payload, .dmg
+# mount, launch, native binding load), while attach against a logged-in WeChat
+# and the address table's coverage are not verified and do not change with
+# publishing — so a .dmg installs and starts, but how much it can hook depends
+# on the WeChat build number it finds on that machine.
+#
+# A release without macOS is still a normal case, not a broken one: the manifest
+# is keyed per platform and the publish job folds in whatever platform fragments
+# exist.
+#
+# The manifest is one document describing every platform, keyed by GOOS-GOARCH
+# (see desktop/internal/update/manifest.go). Each platform job publishes its own
+# entry through scripts/merge-manifest.mjs and the publish job merges the
+# fragments, so the two jobs cannot disagree about the document's shape.
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version to publish, e.g. v2.0.0 (must match wails.json productVersion)'
+        required: true
+
+permissions:
+  contents: write
+
+env:
+  # Where releases are published and where the client reads latest.json from:
+  # the source repository itself. Assets must be anonymously downloadable for
+  # the update chain to work for anyone but this machine's owner — a private
+  # repository needs a token to download from, and a token shipped inside the
+  # client is a token every user can read out of it. The name is compiled into
+  # the client — keep it in step with update.ReleaseRepo
+  # (desktop/internal/update/manifest.go); a Go test asserts they agree.
+  RELEASE_REPO: langbyyi/wxtap
+
+jobs:
+  verify:
+    # A tag-triggered release has two silent failure modes that no later step
+    # catches: the tag can point at a commit whose version is something else,
+    # and package-release.ps1 only *warns* when -Version disagrees with
+    # wails.json. Either way users get a manifest whose version is not the
+    # version the binary reports to update.checkVersion — so every client either
+    # sees an update forever or never sees one. Fail here, before the build
+    # legs spend runner minutes.
+    outputs:
+      # The release notes every later leg embeds into latest.json: the annotated
+      # tag's message, falling back to the tag name. Resolving it once here
+      # keeps the platform legs and the publish merge from drifting apart.
+      notes: ${{ steps.notes.outputs.notes }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: The tag must match the version the build will report
+        run: |
+          version="${{ github.event.inputs.version || github.ref_name }}"
+          case "$version" in v*) ;; *) version="v$version" ;; esac
+          declared="$(node -p "require('./desktop/wails.json').info.productVersion")"
+          case "$declared" in v*) ;; *) declared="v$declared" ;; esac
+          if [ "$version" != "$declared" ]; then
+            echo "::error::tag $version 与 desktop/wails.json 的 productVersion $declared 不一致。wails.json 是版本号的唯一真源：前端构建期读它，外壳运行期读它（desktop/version.go 的 embed），MCP 握手再由外壳注入；而清单的 version 来自 tag —— 两者不一致时用户会一直看到「有新版本」或者永远收不到更新。见 docs/RELEASE.md §二。"
+            exit 1
+          fi
+          echo "version $version matches desktop/wails.json ($declared)"
+      - name: Resolve the release notes from the annotated tag
+        id: notes
+        run: |
+          tag="${{ github.event.inputs.version || github.ref_name }}"
+          case "$tag" in v*) ;; *) tag="v$tag" ;; esac
+          # A shallow checkout may not carry the tag object itself; fetch it so
+          # an annotated tag's message is readable. A dispatch for a version
+          # whose tag does not exist (or a lightweight tag) falls back to the
+          # tag name — what this pipeline published before annotations existed.
+          git fetch --no-tags --force origin "refs/tags/$tag:refs/tags/$tag" || true
+          if git cat-file -e "refs/tags/$tag" 2>/dev/null && [ "$(git cat-file -t "$tag")" = tag ]; then
+            # An annotated tag object: the message starts after the header
+            # block's first blank line.
+            notes="$(git cat-file tag "$tag" | awk 'pass==0 { if ($0=="") pass=1; next } { print }')"
+          fi
+          if [ -z "${notes:-}" ]; then
+            notes="$tag"
+          fi
+          # A double quote would break the pwsh leg's -Notes "..." argument.
+          notes="${notes//$'\r'/}"
+          notes="${notes//\"/\'}"
+          {
+            echo "notes<<NOTES_EOF"
+            printf '%s\n' "$notes"
+            echo "NOTES_EOF"
+          } >> "$GITHUB_OUTPUT"
+
+  windows:
+    needs: verify
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: desktop/go.mod
+          cache-dependency-path: desktop/go.sum
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: |
+            core/package-lock.json
+            desktop/frontend/package-lock.json
+
+      # Stages desktop/build/release (the payload) and desktop/build/release-dist
+      # (WxTap-setup.exe). It fetches a portable NSIS itself; no runner setup.
+      - name: Build the release and the installer
+        run: pwsh -File scripts/build-wails.ps1
+
+      - name: Package the update shards and this platform's manifest entry
+        env:
+          RELEASE_NOTES: ${{ needs.verify.outputs.notes }}
+        run: |
+          # $env:RELEASE_REPO, not $RELEASE_REPO: this step runs under pwsh,
+          # where the workflow's `env:` block is only reachable through the
+          # env: drive. The bare form is an unset PowerShell variable that
+          # expands to an empty string, and package-release.ps1 then fails on
+          # its -Repo binding — which is how this leg failed the first time it
+          # ever ran. The macOS leg gets away with the bare form because its
+          # step is bash, where env vars are read directly.
+          pwsh -File scripts/package-release.ps1 `
+            -Version "${{ github.event.inputs.version || github.ref_name }}" `
+            -Repo "$env:RELEASE_REPO" `
+            -Notes "$env:RELEASE_NOTES"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows-dist
+          path: |
+            desktop/build/release-dist/*
+          if-no-files-found: error
+          retention-days: 7
+
+  macos:
+    # macos-14 is Apple Silicon, so this publishes darwin-arm64. An Intel build
+    # needs macos-13 and the darwin-amd64 key; both can be published together
+    # because the manifest is keyed per platform.
+    #
+    # On by default. SKIP_MACOS=true (Settings → Secrets and variables →
+    # Actions → Variables) pulls macOS from one release; the publish job then
+    # removes the assets this run no longer produces, so the release page and
+    # the manifest cannot end up disagreeing about which platforms exist.
+    if: vars.SKIP_MACOS != 'true'
+    needs: verify
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: desktop/go.mod
+          cache-dependency-path: desktop/go.sum
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: |
+            core/package-lock.json
+            desktop/frontend/package-lock.json
+
+      # Stages WxTap.app, the flat update payload, and WxTap.dmg. Un-notarised,
+      # so a user's first open needs right-click -> Open; removing that needs a
+      # paid Apple Developer ID.
+      - name: Build the app, the payload and the disk image
+        run: ./scripts/build-wails.sh
+
+      # shell: bash is explicit because this step's continuations must be bash's.
+      # The Windows job above gets away with trailing backticks only because
+      # run: defaults to pwsh there; the same text under bash is command
+      # substitution and dies with "unexpected EOF while looking for matching `".
+      - name: Package the update shard and this platform's manifest entry
+        shell: bash
+        env:
+          RELEASE_NOTES: ${{ needs.verify.outputs.notes }}
+        run: |
+          # The manifest key has to name the architecture of the artifact, and
+          # build-wails.sh chooses that one from `go env GOHOSTARCH`. Deriving it
+          # from Node's arch instead can label an arm64 Mach-O as darwin-amd64
+          # (an x64 Node under Rosetta on an Apple Silicon runner), and every
+          # client that downloads it then fails to exec.
+          pwsh -File scripts/package-release.ps1 \
+            -Version "${{ github.event.inputs.version || github.ref_name }}" \
+            -Repo "$RELEASE_REPO" \
+            -Source desktop/build/release-payload \
+            -Platform "darwin-$(go env GOHOSTARCH)" \
+            -Notes "$RELEASE_NOTES"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: macos-dist
+          path: |
+            desktop/build/release-dist/*
+          if-no-files-found: error
+          retention-days: 7
+
+  publish:
+    # The macOS job is skipped in the normal case, and a skipped `needs` would
+    # skip this job too — hence the explicit result check. A *failed* macOS leg
+    # still blocks the release: publishing half a version is worse than a late one.
+    if: always() && needs.verify.result == 'success' && needs.windows.result == 'success' && (needs.macos.result == 'success' || needs.macos.result == 'skipped')
+    needs: [verify, windows, macos]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      # Releases and the manifest live in this repository, so the workflow's own
+      # token is enough — no cross-repository PAT (see docs/RELEASE.md §三).
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+
+      # Each job published one platform's entry; fold them into the single
+      # document the client reads. merge-manifest.mjs is idempotent per platform,
+      # so re-running a single platform's job cannot duplicate an entry.
+      - name: Merge the platform entries into one manifest
+        env:
+          RELEASE_NOTES: ${{ needs.verify.outputs.notes }}
+        run: |
+          # Normalize to a v-prefix: the platform jobs' manifest URLs always
+          # carry one (package-release.ps1 adds it), so a dispatch input like
+          # "2.0.1" must not produce a release tagged "2.0.1" that no URL
+          # points at.
+          version="${{ github.event.inputs.version || github.ref_name }}"
+          case "$version" in v*) tag="$version" ;; *) tag="v$version" ;; esac
+          mkdir -p out
+          for fragment in dist/*/assets-*.json; do
+            platform="$(basename "$fragment" .json)"
+            platform="${platform#assets-}"
+            echo "merging $platform"
+            node scripts/merge-manifest.mjs out/latest.json "$platform" "$fragment" "$tag" "$RELEASE_NOTES"
+          done
+          test -s out/latest.json
+          echo '--- latest.json ---'
+          cat out/latest.json
+
+      # The shards and the manifest are the update channel; the installer and the
+      # disk image are what a new user downloads. All of them belong to the same
+      # release so one tag describes one complete version.
+      # Create-or-update rather than create: re-cutting a version is ordinary
+      # recovery — a bad build, a wrong manifest, a platform switched on after
+      # the fact — and a pipeline that can only run once per tag turns every
+      # recovery into a manual `gh release delete` first. Re-running the
+      # workflow for a tag that already has a release now refreshes its assets
+      # instead of failing.
+      - name: Publish the release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          version="${{ github.event.inputs.version || github.ref_name }}"
+          case "$version" in v*) tag="$version" ;; *) tag="v$version" ;; esac
+          assets=(dist/windows-dist/WxTap-*.tar.gz dist/windows-dist/WxTap-setup.exe)
+          # Same gate as the job that produced them: no macOS assets unless it ran.
+          if compgen -G "dist/macos-dist/WxTap*" > /dev/null; then
+            assets+=(dist/macos-dist/WxTap-*.tar.gz dist/macos-dist/WxTap.dmg)
+          fi
+
+          if gh release view "$tag" -R "$RELEASE_REPO" > /dev/null 2>&1; then
+            echo "release $tag already exists; refreshing its assets"
+            gh release upload "$tag" -R "$RELEASE_REPO" --clobber "${assets[@]}"
+          else
+            gh release create "$tag" -R "$RELEASE_REPO" --title "$tag" --notes "见 latest.json 的 notes 字段" "${assets[@]}"
+          fi
+
+          # Remove what this build no longer produces. Skipping macOS with
+          # SKIP_MACOS after a release that had it would otherwise leave the
+          # .dmg on the page while latest.json carries no darwin-* entry — a
+          # release page advertising a platform the manifest disagrees about.
+          current="$(printf '%s\n' "${assets[@]}" | xargs -n1 basename | sort)"
+          gh release view "$tag" -R "$RELEASE_REPO" --json assets --jq '.assets[].name' | while read -r name; do
+            [ -n "$name" ] || continue
+            if ! printf '%s\n' "$current" | grep -qxF "$name"; then
+              echo "removing an asset this build does not produce: $name"
+              gh release delete-asset "$tag" "$name" -R "$RELEASE_REPO" --yes
+            fi
+          done
+
+      # The client reads the manifest from a fixed address on the default
+      # branch, so it has to be committed there, not only attached to the
+      # release.
+      - name: Commit the manifest to the default branch
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          version="${{ github.event.inputs.version || github.ref_name }}"
+          case "$version" in v*) tag="$version" ;; *) tag="v$version" ;; esac
+          content="$(base64 -w0 out/latest.json)"
+          # Absent on the very first release, which is the only case with no sha.
+          sha="$(gh api "repos/$RELEASE_REPO/contents/latest.json" --jq .sha 2>/dev/null || true)"
+          if [ -n "$sha" ]; then
+            gh api -X PUT "repos/$RELEASE_REPO/contents/latest.json" -f message="release: latest.json for $tag" -f content="$content" -f sha="$sha" > /dev/null
+          else
+            gh api -X PUT "repos/$RELEASE_REPO/contents/latest.json" -f message="release: latest.json for $tag" -f content="$content" > /dev/null
+          fi
+          echo "manifest published: https://raw.githubusercontent.com/$RELEASE_REPO/main/latest.json"
+
+      # The feedback page (desktop/frontend/src/views/FeedbackView.vue) reads
+      # this file from the same fixed-address pattern as latest.json. The
+      # document lives at docs/FEEDBACK.md and ships verbatim, riding along with
+      # releases like the manifest.
+      - name: Publish the feedback document
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          test -f docs/FEEDBACK.md
+          content="$(base64 -w0 docs/FEEDBACK.md)"
+          # Absent until the first release after this step shipped.
+          sha="$(gh api "repos/$RELEASE_REPO/contents/feedback.md" --jq .sha 2>/dev/null || true)"
+          if [ -n "$sha" ]; then
+            gh api -X PUT "repos/$RELEASE_REPO/contents/feedback.md" -f message="docs: feedback.md" -f content="$content" -f sha="$sha" > /dev/null
+          else
+            gh api -X PUT "repos/$RELEASE_REPO/contents/feedback.md" -f message="docs: feedback.md" -f content="$content" > /dev/null
+          fi
+          echo "feedback published: https://raw.githubusercontent.com/$RELEASE_REPO/main/feedback.md"
