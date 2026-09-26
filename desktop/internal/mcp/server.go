@@ -795,8 +795,10 @@ var leanCatalog = map[string]bool{
 	"wxapi_replay": true, "miniapp_http_request": true,
 	// 导航鉴权。
 	"navigator_guard": true, "navigator_visit": true, "navigator_blocked_redirects": true,
-	// 审计面：资产清单与流量单条全部上榜。
+	// 审计面：资产清单与流量单条全部上榜。traffic_appids 是选 appId/appid
+	// 的入口（traffic_list 的过滤、asset_scan 的目标都靠它），不能缺席。
 	"asset_scan": true, "asset_list": true, "asset_export": true,
+	"traffic_appids": true,
 	"traffic_curl": true, "traffic_replay": true,
 	// 离线审计。
 	"extract_inventory": true, "miniapp_decompile": true,
