@@ -16,7 +16,7 @@ import (
 // A mistyped path must not read as a clean 0-file scan.
 func TestMCPScanRejectsMissingDirectory(t *testing.T) {
 	missing := filepath.Join(t.TempDir(), "nope")
-	if _, err := mcpScan(context.Background(), missing); err == nil {
+	if _, err := mcpScan(context.Background(), missing, nil); err == nil {
 		t.Fatal("missing directory must be an error")
 	} else if !strings.Contains(err.Error(), "directory not found") {
 		t.Fatalf("error: %v", err)
@@ -29,7 +29,7 @@ func TestMCPScanScansExistingDirectory(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	result, err := mcpScan(context.Background(), dir)
+	result, err := mcpScan(context.Background(), dir, nil)
 	if err != nil {
 		t.Fatalf("scan: %v", err)
 	}
@@ -68,7 +68,7 @@ func TestMCPScanReportIncludesStructuredFindings(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	result, err := mcpScan(context.Background(), dir)
+	result, err := mcpScan(context.Background(), dir, nil)
 	if err != nil {
 		t.Fatalf("scan: %v", err)
 	}

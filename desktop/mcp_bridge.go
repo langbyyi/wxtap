@@ -133,14 +133,19 @@ func (l *mcpAppBridge) Call(ctx context.Context, method string, params map[strin
 	return l.app.router.Call(ctx, method, raw)
 }
 
-// mcpScan adapts the extract scanner to the MCP scan tool.
-func mcpScan(ctx context.Context, dir string) (mcp.ScanResult, error) {
+// mcpScan adapts the extract scanner to the MCP scan tool. progress feeds the
+// scan job registry's running envelope; ctx is the detached job context, not
+// the caller's request.
+func mcpScan(ctx context.Context, dir string, progress func(done, total int)) (mcp.ScanResult, error) {
 	_ = ctx
 	// A mistyped path must not read as a clean 0-file scan.
 	if info, err := os.Stat(dir); err != nil || !info.IsDir() {
 		return mcp.ScanResult{}, fmt.Errorf("directory not found: %s", dir)
 	}
-	result := extract.ScanFiles(dir)
+	result, err := extract.ScanFilesWithPatternsProgress(dir, nil, progress)
+	if err != nil {
+		return mcp.ScanResult{}, err
+	}
 	summary := map[string]int{}
 	for key, values := range result.Analysis {
 		summary[key] = len(values)

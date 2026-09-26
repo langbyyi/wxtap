@@ -15,6 +15,8 @@ import (
 	"unicode/utf8"
 
 	"github.com/langbyyi/wxtap/desktop/internal/api/ipc"
+	"sync"
+	"time"
 )
 
 type fakeTraffic struct{}
@@ -931,7 +933,7 @@ func TestEveryMiniappToolHasCallableDispatch(t *testing.T) {
 	deps := Deps{
 		Core: &fakeCore{}, AppBridge: pathsBridge{outputDir: codeRoot},
 		AllowedCodeRoot: codeRoot,
-		Scan: func(context.Context, string) (ScanResult, error) {
+		Scan: func(_ context.Context, _ string, _ func(int, int)) (ScanResult, error) {
 			return ScanResult{FilesScanned: 1, Summary: map[string]int{"secret": 1}, Report: json.RawMessage(`{"result":{"secret":["x"]}}`)}, nil
 		},
 	}
@@ -1014,10 +1016,13 @@ func TestMiniappScanSensitiveRejectsAppIDPathEscape(t *testing.T) {
 	if err := os.MkdirAll(filepath.Join(root, "wxone"), 0o750); err != nil {
 		t.Fatal(err)
 	}
+	var scanMu sync.Mutex
 	deps := Deps{
 		AppBridge: pathsBridge{outputDir: root},
-		Scan: func(_ context.Context, path string) (ScanResult, error) {
+		Scan: func(_ context.Context, path string, _ func(int, int)) (ScanResult, error) {
+			scanMu.Lock()
 			scanned = append(scanned, path)
+			scanMu.Unlock()
 			return ScanResult{}, nil
 		},
 	}
@@ -1038,7 +1043,10 @@ func TestMiniappScanSensitiveRejectsAppIDPathEscape(t *testing.T) {
 			t.Fatalf("appid %q should be rejected, got %s", appid, text)
 		}
 	}
-	if len(scanned) != 0 {
+	scanMu.Lock()
+	rejected := len(scanned)
+	scanMu.Unlock()
+	if rejected != 0 {
 		t.Fatalf("scanner ran for rejected appids: %#v", scanned)
 	}
 
@@ -1049,8 +1057,22 @@ func TestMiniappScanSensitiveRejectsAppIDPathEscape(t *testing.T) {
 	if strings.Contains(text, "appid") && strings.Contains(text, "invalid") {
 		t.Fatalf("valid appid rejected: %s", text)
 	}
-	if len(scanned) != 1 || !strings.HasSuffix(scanned[0], "wxone") {
-		t.Fatalf("valid appid should scan its output dir: %#v", scanned)
+	// 扫描已改异步受理：等后台任务真的扫到输出目录（最多 2s）。
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		scanMu.Lock()
+		count, first := len(scanned), ""
+		if count > 0 {
+			first = scanned[0]
+		}
+		scanMu.Unlock()
+		if count == 1 && strings.HasSuffix(first, "wxone") {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("valid appid should scan its output dir: %#v", scanned)
+		}
+		time.Sleep(10 * time.Millisecond)
 	}
 }
 
@@ -1286,7 +1308,7 @@ func TestMiniappScanSensitiveReportsMissingDecompiledOutput(t *testing.T) {
 	scanned := []string{}
 	deps := Deps{
 		AppBridge: pathsBridge{outputDir: root},
-		Scan: func(_ context.Context, path string) (ScanResult, error) {
+		Scan: func(_ context.Context, path string, _ func(int, int)) (ScanResult, error) {
 			scanned = append(scanned, path)
 			return ScanResult{}, nil
 		},

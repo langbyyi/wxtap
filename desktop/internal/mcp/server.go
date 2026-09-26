@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"os"
 	"runtime/debug"
 	"sort"
 	"strings"
@@ -241,7 +242,7 @@ type ScanResult struct {
 }
 
 // ScanFunc runs the sensitive-info analyzer over a directory.
-type ScanFunc func(ctx context.Context, dir string) (ScanResult, error)
+type ScanFunc func(ctx context.Context, dir string, progress func(done, total int)) (ScanResult, error)
 
 type request struct {
 	JSONRPC string          `json:"jsonrpc"`
@@ -346,6 +347,13 @@ type Server struct {
 	breakpointMu sync.Mutex
 	breakpoints  map[string]breakpointEntry
 
+	// scanMu guards the scan accept/poll/cache registry (scanjob.go): the
+	// sensitive-info tools accept a background job and poll by re-invoking.
+	scanMu    sync.Mutex
+	scanJobs  map[string]*scanJob
+	scanCache map[string]*scanCacheEntry
+	scanSlots chan struct{}
+
 	// contextMu guards the cached execution-context ids. Context ids belong to
 	// the page realm: reloading the miniapp, or replacing a page webview,
 	// hands out new ones, so a cached id is re-validated before it is used.
@@ -359,7 +367,7 @@ type Server struct {
 
 // New wires an MCP server over the given providers.
 func New(deps Deps) *Server {
-	return &Server{deps: deps}
+	return &Server{deps: deps, scanSlots: make(chan struct{}, 1)}
 }
 
 // Serve reads newline-delimited requests until EOF, writing one response line
@@ -573,7 +581,7 @@ func (s *Server) tools() []toolDef {
 				"name":     map[string]any{"type": "string", "enum": []string{"wxapi", "cloud"}},
 				"afterSeq": num, "limit": num, "timeoutMs": num,
 			}, "name")},
-		{Name: "scan_dir", Description: "Scan an unpacked wxapkg directory for sensitive information (credentials, IDs, URLs, OSS buckets). Findings are deduped by rule+value+file with the snippet windowed around the match and capped (total_findings/truncated report the rest) — the raw scanner report on a minified bundle is far too large to return",
+		{Name: "scan_dir", Description: "Scan an unpacked wxapkg directory for sensitive information (credentials, IDs, URLs, OSS buckets). Findings are deduped by rule+value+file with the snippet windowed around the match and capped (total_findings/truncated report the rest) — the raw scanner report on a minified bundle is far too large to return. Large directories run as a background job: the first call accepts it and answers {async:true, task_id, status:'started'}; call again with the same arguments to poll (status:'running' carries files_done/files_total; status:'error' reports a failure once, the next call retries); an unchanged directory answers instantly with cached:true",
 			InputSchema: schema(map[string]any{"dir": str}, "dir")},
 		{Name: "miniapp_screenshot", Description: "Take a screenshot of the current miniapp page",
 			InputSchema: schema(map[string]any{"format": map[string]any{"type": "string", "enum": []string{"png", "jpeg"}}, "quality": integer})},
@@ -604,7 +612,7 @@ func (s *Server) tools() []toolDef {
 		{Name: "miniapp_http_request", Description: "Send an HTTP request for backend testing",
 			InputSchema: schema(map[string]any{"method": str, "url": str, "headers": object, "body": str, "timeout": num}, "method", "url")},
 		{Name: "miniapp_decompile", Description: "Decompile wxapkg packages for an appid. Refuses an app whose page templates come from WeChat's newer template runtime (extract_inventory reports those as unsupported:true) — the restoration cannot succeed, so no output would be produced", InputSchema: schema(map[string]any{"appid": str, "packages_dir": str}, "appid")},
-		{Name: "miniapp_scan_sensitive", Description: "Scan the decompiled output directory of an appid for sensitive information. Findings come back deduped by rule+value+file with the snippet windowed around the match and capped (total_findings/truncated report the rest) — run miniapp_decompile first, and expect minified bundles to inflate total_findings",
+		{Name: "miniapp_scan_sensitive", Description: "Scan the decompiled output directory of an appid for sensitive information. Findings come back deduped by rule+value+file with the snippet windowed around the match and capped (total_findings/truncated report the rest) — run miniapp_decompile first, and expect minified bundles to inflate total_findings. Large projects run as a background job: the first call accepts it and answers {async:true, task_id, status:'started'}; call again with the same arguments to poll (status:'running' carries files_done/files_total; status:'error' reports a failure once, the next call retries); an unchanged directory answers instantly with cached:true",
 			InputSchema: schema(map[string]any{"appid": str}, "appid")},
 		{Name: "miniapp_read_file", Description: "Read a decompiled source file", InputSchema: schema(map[string]any{"path": str, "max_length": integer}, "path")},
 		{Name: "miniapp_search_code", Description: "Search decompiled source using text or regular expression. Each hit carries column (1-based rune offset of the match) and an excerpt windowed around the match — on minified one-line bundles the excerpt is the only part of the line worth reading",
@@ -970,23 +978,10 @@ func (s *Server) callTool(req *request) *response {
 		if args.Dir == "" {
 			return ok(req, toolError("dir is required"))
 		}
-		scan, err := s.deps.Scan(ctx, args.Dir)
-		if err != nil {
-			return ok(req, toolError(err.Error()))
+		if info, err := os.Stat(args.Dir); err != nil || !info.IsDir() {
+			return ok(req, toolError("directory not found: "+args.Dir))
 		}
-		// 与 miniapp_scan_sensitive 同一份扫描器、同一个输出问题：压缩单行
-		// bundle 的原始报告能把一次调用的回复撑到几百 KB。结果在这里整形后
-		// 再交给调用方（去重、snippet 窗口化、封顶，总量如实上报）。
-		report := map[string]any{}
-		if len(scan.Report) > 0 {
-			_ = json.Unmarshal(scan.Report, &report)
-		}
-		findings, total, truncated := shapeScanFindings(report["findings"])
-		result = map[string]any{
-			"files_scanned": scan.FilesScanned, "total_size": scan.TotalSize,
-			"summary": scan.Summary, "categories_found": mapKeys(scan.Summary),
-			"findings": findings, "total_findings": total, "truncated": truncated,
-		}
+		return ok(req, s.requestScan(args.Dir))
 	case "hook_wait":
 		result, err = s.hookWait(ctx, params.Arguments)
 		if err != nil {

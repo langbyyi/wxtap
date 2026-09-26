@@ -474,23 +474,7 @@ func (s *Server) callMiniappTool(ctx context.Context, name string, raw json.RawM
 		if info, err := os.Stat(scanPath); err != nil || !info.IsDir() {
 			return nil, errors.New("Decompiled output not found. Run miniapp_decompile first for " + appid)
 		}
-		scan, err := s.deps.Scan(ctx, scanPath)
-		if err != nil {
-			return nil, err
-		}
-		report := map[string]any{}
-		_ = json.Unmarshal(scan.Report, &report)
-		findings, total, truncated := shapeScanFindings(report["findings"])
-		analysis, _ := report["result"].(map[string]any)
-		if analysis == nil {
-			analysis = map[string]any{}
-		}
-		return map[string]any{
-			"scan_path": scanPath, "files_scanned": scan.FilesScanned,
-			"findings": findings, "total_findings": total, "truncated": truncated,
-			"result":           analysis,
-			"categories_found": mapKeys(scan.Summary),
-		}, nil
+		return s.requestScan(scanPath), nil
 	case "miniapp_read_file":
 		path := stringArg(args, "path", "")
 		// The tool's contract is "read a decompiled source file": without a

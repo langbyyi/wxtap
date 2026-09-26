@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 )
 
 type scanShapeBridge struct{ root string }
@@ -24,20 +25,38 @@ func TestSensitiveScanToolReturnsFindingArray(t *testing.T) {
 	}
 	server := New(Deps{
 		AppBridge: scanShapeBridge{root: root},
-		Scan: func(context.Context, string) (ScanResult, error) {
+		Scan: func(_ context.Context, _ string, _ func(int, int)) (ScanResult, error) {
 			return ScanResult{
 				Report: json.RawMessage(`{"result":{"secret":["x"]},"findings":[{"id":"f1","masked":"***"}]}`),
 			}, nil
 		},
 	})
 
+	// 受理：首次调用立即返回异步信封，不阻塞在扫描上。
 	result, err := server.callMiniappTool(context.Background(), "miniapp_scan_sensitive", json.RawMessage(`{"appid":"wxone"}`))
 	if err != nil {
 		t.Fatalf("scan tool: %v", err)
 	}
+	envelope, ok := result.(map[string]any)
+	if !ok || envelope["status"] != "started" || envelope["async"] != true {
+		t.Fatalf("accept envelope = %#v", result)
+	}
+
+	// 轮询：任务完成后同参调用返回完整结果（来自缓存）。
+	dir := filepath.Join(root, "wxone")
+	if !server.scanWaitDone(dir, 2*time.Second) {
+		t.Fatal("scan did not finish")
+	}
+	result, err = server.callMiniappTool(context.Background(), "miniapp_scan_sensitive", json.RawMessage(`{"appid":"wxone"}`))
+	if err != nil {
+		t.Fatalf("scan poll: %v", err)
+	}
 	payload, ok := result.(map[string]any)
 	if !ok {
 		t.Fatalf("payload type = %T", result)
+	}
+	if payload["cached"] != true {
+		t.Fatalf("finished scan should be cached: %#v", payload)
 	}
 	findings, ok := payload["findings"].([]any)
 	if !ok || len(findings) != 1 {
