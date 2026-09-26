@@ -11,7 +11,7 @@
   },
   "info": {
     "productName": "WxTap",
-    "productVersion": "1.0.0",
+    "productVersion": "1.0.1",
     "comments": "WeChat mini-program security debugging — Frida + CDP desktop toolkit"
   }
 }
