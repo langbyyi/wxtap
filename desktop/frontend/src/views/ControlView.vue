@@ -58,6 +58,23 @@ function togglePause() {
   else pauseLogs();
 }
 const allChannelsReady = computed(() => store.status.frida && store.status.miniapp && store.status.devtools);
+const connectionStage = computed(() => {
+  if (store.starting) return '正在附加微信';
+  if (store.stopping) return '正在停止引擎';
+  if (store.error) return '引擎操作失败';
+  if (!store.status.frida) return '引擎未启动';
+  if (!store.status.miniapp) return '已附加，等待小程序';
+  if (!store.status.devtools) return '小程序已连接，等待 DevTools';
+  return '调试通道已就绪';
+});
+const lastHostLoad = computed(() => [...store.logs].reverse().find((entry) =>
+  /\[hook\] (?:scene:|hook scene ->|debug flag ->|scene hook error:)/.test(entry.message ?? '')));
+const lastConnectionError = computed(() => [...store.logs].reverse().find((entry) =>
+  entry.level?.toLowerCase() === 'error' || /\[hook:error\]|\[hook\] scene hook error:/.test(entry.message ?? '')));
+const connectionDetails = computed(() => [
+  lastHostLoad.value ? `最近宿主加载事件：${lastHostLoad.value.time ?? ''} ${lastHostLoad.value.message}` : '',
+  lastConnectionError.value ? `最近错误（历史）：${lastConnectionError.value.time ?? ''} ${lastConnectionError.value.message}` : '',
+].filter(Boolean).join('\n'));
 const activeTasks = computed(() => Object.values(store.tasks).filter((task) => !['done', 'failed', 'cancelled'].includes(task.phase)));
 function clearLogs() {
   // 清空时一并解除暂停，否则用户看到的还是暂停前的旧快照，会和「已清空」提示矛盾
@@ -139,6 +156,9 @@ onBeforeUnmount(() => {
               <dd data-testid="frida-status" :class="store.status.frida ? 'connected' : 'disconnected'">
                 <span class="status-pill" :class="store.status.frida ? 'ok' : 'off'">{{ store.status.frida ? '已连接' : '未连接' }}</span>
               </dd>
+            </div>
+            <div class="status-row" data-testid="connection-diagnosis" :title="connectionDetails">
+              <dt>调试连接</dt><dd role="status">{{ connectionStage }}</dd>
             </div>
           </div>
         </dl>

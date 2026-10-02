@@ -55,7 +55,7 @@ case "$go_host_arch" in
 esac
 
 echo "==> Building Wails bundle ($wails_platform)"
-(cd "$desktop" && go run github.com/wailsapp/wails/v2/cmd/wails@v2.16.0 build -clean -s -platform "$wails_platform")
+(cd "$desktop" && go run github.com/wailsapp/wails/v2/cmd/wails@v2.16.0 build -clean -s -trimpath -platform "$wails_platform")
 
 # Refuse to clean anything outside desktop/build, mirroring the PowerShell
 # script's guard: release paths are derived, never trusted.

@@ -2,6 +2,15 @@ import { describe, expect, it } from 'vitest';
 import { describeTarget, inspectorUrlForTarget } from './target-role';
 
 describe('describeTarget', () => {
+  it('keeps the WeChat LiteApp root container out of business H5 candidates', () => {
+    for (const url of ['https://liteapp.weixin.qq.com/', 'https://LITEAPP.WEIXIN.QQ.COM?debug=1']) {
+      expect(describeTarget({ type: 'page', url }).role).toBe('微信容器');
+    }
+    for (const url of ['https://liteapp.weixin.qq.com/article', 'https://liteapp.weixin.qq.com.example.com/', 'https://mp.weixin.qq.com/s/article']) {
+      expect(describeTarget({ type: 'page', url }).role).toBe('H5 候选');
+    }
+  });
+
   it('reads the mini-program appid and build from a page-frame target', () => {
     expect(describeTarget({
       type: 'page',
@@ -27,6 +36,18 @@ describe('describeTarget', () => {
 
   it('labels workers and ordinary pages without inventing an appid', () => {
     expect(describeTarget({ type: 'worker', url: 'wss://worker' })).toMatchObject({ role: '逻辑层', appid: '', miniappPage: false });
-    expect(describeTarget({ type: 'page', url: 'https://example' })).toMatchObject({ role: '页面', miniappPage: false });
+    expect(describeTarget({ type: 'page', url: 'https://example' })).toMatchObject({ role: 'H5 候选', miniappPage: false });
+  });
+
+  it('uses the actual hostname and pathname when distinguishing H5 from miniapps', () => {
+    for (const url of [
+      'https://servicewechat.com.evil.test/wxabc1234567890a/8/page-frame.html',
+      'https://example.com/?next=https://servicewechat.com/wxabc1234567890a/8/page-frame.html',
+    ]) expect(describeTarget({ type: 'page', url })).toMatchObject({ role: 'H5 候选', appid: '', miniappPage: false });
+    for (const url of ['about:blank', 'devtools://devtools/bundled/inspector.html', 'invalid']) {
+      expect(describeTarget({ type: 'page', url }).role).toBe('页面');
+    }
+    expect(describeTarget({ type: 'iframe', url: 'https://example.com/frame' }).role).toBe('H5 候选');
+    expect(describeTarget({ type: 'worker', url: 'https://example.com/worker.js' }).role).toBe('逻辑层');
   });
 });

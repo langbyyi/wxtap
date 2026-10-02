@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -1765,17 +1766,42 @@ func (a *App) registerDevtoolsHandlers(r *ipc.Router) {
 	// Electron 是唯一的窗口打开方式：把 devtools:// 作为启动参数交给
 	// Chrome/Edge 会被丢弃（实测 2026-09 Chrome 155，独立 profile 也一样），
 	// 结果只是一个新标签页。
-	r.Register("shell.openDevtoolsWindow", func(_ context.Context, params json.RawMessage) (any, error) {
+	r.Register("shell.openDevtoolsWindow", func(ctx context.Context, params json.RawMessage) (any, error) {
 		var args struct {
-			CDPPort      int    `json:"cdp_port"`
-			ElectronPath string `json:"electron_path"`
-			TargetID     string `json:"target_id"`
+			CDPPort      int             `json:"cdp_port"`
+			ElectronPath string          `json:"electron_path"`
+			TargetID     string          `json:"target_id"`
+			ClientID     json.RawMessage `json:"client_id"`
 		}
-		_ = json.Unmarshal(params, &args)
+		if err := json.Unmarshal(params, &args); err != nil {
+			return nil, fmt.Errorf("调试窗口参数无效: %w", err)
+		}
 		if args.CDPPort == 0 {
 			args.CDPPort = defaultCDPPort
 		}
 		pageURL := devtoolsInspectorURL(args.CDPPort, args.TargetID)
+		if len(args.ClientID) > 0 {
+			var clientID int64
+			if string(args.ClientID) == "null" || json.Unmarshal(args.ClientID, &clientID) != nil {
+				return nil, fmt.Errorf("H5 调试窗口参数要求有效 client_id")
+			}
+			var err error
+			pageURL, err = devtoolsH5InspectorURL(args.CDPPort, clientID, args.TargetID)
+			if err != nil {
+				return nil, err
+			}
+			client, err := a.currentEngine()
+			if err != nil {
+				return nil, err
+			}
+			snapshot, err := client.Targets(ctx)
+			if err != nil {
+				return nil, err
+			}
+			if err := validateH5Snapshot(snapshot, clientID, args.TargetID); err != nil {
+				return nil, err
+			}
+		}
 		// An empty path means "use whichever Electron this machine has": the
 		// Settings page still wins when it holds one, and the resolution (PATH,
 		// npm global, well-known locations) is the backend's business either way.
@@ -2152,7 +2178,72 @@ func (a *App) registerMiniappHandlers(r *ipc.Router) {
 		return map[string]any{"enabled": enabled}, nil
 	})
 
+	// Pause control is pinned to an explicit locked connection, never broadcast.
+	r.Register("debugger.pausePolicy", func(ctx context.Context, params json.RawMessage) (any, error) {
+		var args struct {
+			Enabled  json.RawMessage `json:"enabled"`
+			ClientID int64           `json:"clientId"`
+		}
+		if err := json.Unmarshal(params, &args); err != nil {
+			return nil, fmt.Errorf("暂停策略参数无效: %w", err)
+		}
+		var enabled *bool
+		if len(args.Enabled) > 0 {
+			var value bool
+			if string(args.Enabled) == "null" || json.Unmarshal(args.Enabled, &value) != nil || args.ClientID <= 0 {
+				return nil, fmt.Errorf("暂停策略参数要求 enabled 为布尔值、clientId 为正整数")
+			}
+			enabled = &value
+		}
+		client, err := a.currentEngine()
+		if err != nil {
+			return nil, err
+		}
+		return client.PausePolicy(ctx, enabled, args.ClientID)
+	})
+
 	// Targets domain: CDP target enumeration and attachment.
+	r.Register("targets.sessions", func(ctx context.Context, _ json.RawMessage) (any, error) {
+		client, err := a.currentEngine()
+		if err != nil {
+			return nil, err
+		}
+		return client.H5Sessions(ctx)
+	})
+	r.Register("targets.close", func(ctx context.Context, params json.RawMessage) (any, error) {
+		var args struct {
+			ClientID int64  `json:"clientId"`
+			TargetID string `json:"targetId"`
+		}
+		if json.Unmarshal(params, &args) != nil || args.ClientID <= 0 || args.ClientID > 9007199254740991 || !safeDevtoolsTargetID(args.TargetID) {
+			return nil, fmt.Errorf("H5 会话释放参数要求有效 clientId 和 targetId")
+		}
+		client, err := a.currentEngine()
+		if err != nil {
+			return nil, err
+		}
+		if err := client.CloseH5(ctx, args.ClientID, args.TargetID); err != nil {
+			return nil, err
+		}
+		return map[string]any{"ok": true}, nil
+	})
+	r.Register("targets.probe", func(ctx context.Context, params json.RawMessage) (any, error) {
+		var args struct {
+			ClientID int64  `json:"clientId"`
+			TargetID string `json:"targetId"`
+		}
+		if err := json.Unmarshal(params, &args); err != nil {
+			return nil, fmt.Errorf("H5 验证参数无效: %w", err)
+		}
+		if args.ClientID <= 0 || !safeDevtoolsTargetID(args.TargetID) {
+			return nil, fmt.Errorf("H5 验证参数要求 clientId 为正整数、targetId 为有效目标 ID")
+		}
+		client, err := a.currentEngine()
+		if err != nil {
+			return nil, err
+		}
+		return client.ProbeTarget(ctx, args.ClientID, args.TargetID)
+	})
 	r.Register("targets.list", func(ctx context.Context, _ json.RawMessage) (any, error) {
 		targets := []any{}
 		client, err := a.currentEngine()
@@ -2161,16 +2252,16 @@ func (a *App) registerMiniappHandlers(r *ipc.Router) {
 			// 失败」完全是两回事，所以把原因一起带回去。
 			return map[string]any{"targets": targets, "error": "调试目标不可用：" + err.Error()}, nil
 		}
-		resp, err := client.CDPCommand(ctx, "Target.getTargets", map[string]any{}, 8000)
+		resp, err := client.Targets(ctx)
 		if err != nil {
 			return map[string]any{"targets": targets, "error": "读取调试目标失败：" + err.Error()}, nil
 		}
-		if inner, ok := resp["result"].(map[string]any); ok {
-			if infos, ok := inner["targetInfos"].([]any); ok {
-				targets = infos
-			}
+		infos, ok := resp["targets"].([]any)
+		if !ok {
+			return map[string]any{"targets": targets, "error": "读取调试目标失败：CDP 未返回有效目标清单"}, nil
 		}
-		return map[string]any{"targets": targets}, nil
+		targets = infos
+		return map[string]any{"targets": targets, "clientId": resp["clientId"], "locked": resp["locked"]}, nil
 	})
 	r.Register("targets.attach", func(ctx context.Context, params json.RawMessage) (any, error) {
 		var args struct {
@@ -2676,10 +2767,13 @@ func (a *App) startStatusPoller() {
 	// before draining tracked background work (a poller tick must not add to
 	// the WaitGroup while shutdown waits on it).
 	pollCtx, cancel := context.WithCancel(a.ctx)
+	done := make(chan struct{})
 	a.mu.Lock()
 	a.pollerCancel = cancel
+	a.pollerDone = done
 	a.mu.Unlock()
 	go func() {
+		defer close(done)
 		var last engine.EngineStatus
 		var reportedDown *engine.Client
 		ticker := time.NewTicker(time.Second)
@@ -2723,7 +2817,7 @@ func (a *App) startStatusPoller() {
 				continue
 			default:
 			}
-			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+			ctx, cancel := context.WithTimeout(pollCtx, 2*time.Second)
 			status, err := current.Status(ctx)
 			cancel()
 			if err != nil {
@@ -3147,6 +3241,39 @@ func safeDevtoolsTargetID(id string) bool {
 		}
 	}
 	return true
+}
+
+func devtoolsH5InspectorURL(port int, clientID int64, targetID string) (string, error) {
+	if port == 0 {
+		port = defaultCDPPort
+	}
+	if port < 1 || port > 65535 || clientID <= 0 || clientID > 9007199254740991 || !safeDevtoolsTargetID(targetID) {
+		return "", fmt.Errorf("H5 调试窗口参数无效")
+	}
+	return fmt.Sprintf("devtools://devtools/bundled/inspector.html?ws=127.0.0.1:%d/devtools/h5/%d/%s", port, clientID, targetID), nil
+}
+
+func validateH5Snapshot(snapshot map[string]any, clientID int64, targetID string) error {
+	if snapshot["clientId"] != float64(clientID) || snapshot["locked"] != true {
+		return fmt.Errorf("H5 来源连接已变化，请锁定目标后刷新")
+	}
+	targets, _ := snapshot["targets"].([]any)
+	for _, raw := range targets {
+		info, ok := raw.(map[string]any)
+		if !ok || info["targetId"] != targetID {
+			continue
+		}
+		pageURL, _ := info["url"].(string)
+		parsed, err := url.Parse(pageURL)
+		if err == nil && parsed.Hostname() != "" && (parsed.Scheme == "http" || parsed.Scheme == "https") &&
+			!strings.EqualFold(parsed.Hostname(), "servicewechat.com") && (info["type"] == "page" || info["type"] == "iframe") {
+			if strings.EqualFold(parsed.Hostname(), "liteapp.weixin.qq.com") && (parsed.Path == "" || parsed.Path == "/") {
+				return fmt.Errorf("该目标是微信容器页面，请选择实际 H5 网页")
+			}
+			return nil
+		}
+	}
+	return fmt.Errorf("H5 目标不存在或不是可调试网页，请刷新目标清单")
 }
 
 func electronLaunch(goos, electronPath, script, url string) (string, []string, error) {

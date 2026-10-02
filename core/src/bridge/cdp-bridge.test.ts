@@ -26,6 +26,204 @@ function lastPayload(sent: Array<Buffer | string>): Record<string, unknown> {
   return JSON.parse(outbound?.payload ?? "{}") as Record<string, unknown>;
 }
 
+async function flushPolicyCommands(): Promise<void> {
+  for (let turn = 0; turn < 6; turn += 1) await Promise.resolve();
+}
+
+describe("CdpBridge pause policy", () => {
+  it.each([true, false])("reconfirms on relock only when invalidated by reload (%s)", async (reloaded) => {
+    vi.useFakeTimers();
+    try {
+      const bridge = new CdpBridge(); const a = peer(); const id = bridge.addMiniapp(a.value);
+      const pending = bridge.setSkipAllPauses(id, true);
+      respond(bridge, id, lastPayload(a.sent).id as number, {}); await flushPolicyCommands();
+      respond(bridge, id, lastPayload(a.sent).id as number, {}); await pending;
+      bridge.setLock(false);
+      if (reloaded) {
+        bridge.receiveMiniapp(encodeCdpMessage({ sequence: 1, category: "chromeDevtoolsResult", operationId: 0,
+          payload: JSON.stringify({ method: "Debugger.globalObjectCleared", params: {} }), jsContextId: "" }), id);
+      } else {
+        bridge.forwardDevtools(JSON.stringify({ id: 9, method: "Debugger.setSkipAllPauses", params: { skip: false } }));
+      }
+      const before = a.sent.length;
+      bridge.setLock(true);
+      expect(bridge.pausePolicy()).toMatchObject({ clientId: id, known: false, busy: reloaded });
+      if (!reloaded) {
+        expect(a.sent).toHaveLength(before);
+        return;
+      }
+      expect(lastPayload(a.sent).method).toBe("Debugger.enable");
+      respond(bridge, id, lastPayload(a.sent).id as number, {}); await flushPolicyCommands();
+      expect(lastPayload(a.sent)).toMatchObject({ method: "Debugger.setSkipAllPauses", params: { skip: true } });
+      respond(bridge, id, lastPayload(a.sent).id as number, {}); await flushPolicyCommands();
+      expect(bridge.pausePolicy()).toMatchObject({ enabled: true, known: true, busy: false });
+    } finally { vi.clearAllTimers(); vi.useRealTimers(); }
+  });
+
+  it("only confirms the locked target after successful CDP replies and restores pauses", async () => {
+    const bridge = new CdpBridge();
+    const a = peer(); const b = peer();
+    const id = bridge.addMiniapp(a.value);
+    bridge.setMiniappInfo(id, "wxaaa111", "测试小程序");
+    bridge.addMiniapp(b.value);
+    expect(bridge.pausePolicy()).toMatchObject({ clientId: id, known: false, enabled: false });
+    const pending = bridge.setSkipAllPauses(id, true);
+    expect(bridge.pausePolicy().busy).toBe(true);
+    respond(bridge, id, lastPayload(a.sent).id as number, {});
+    await flushPolicyCommands();
+    expect(lastPayload(a.sent)).toMatchObject({ method: "Debugger.setSkipAllPauses", params: { skip: true } });
+    expect(bridge.pausePolicy().known).toBe(false);
+    respond(bridge, id, lastPayload(a.sent).id as number, {});
+    await expect(pending).resolves.toMatchObject({ enabled: true, known: true, busy: false });
+    expect(b.sent).toHaveLength(0);
+    const restoring = bridge.setSkipAllPauses(id, false);
+    respond(bridge, id, lastPayload(a.sent).id as number, {});
+    await flushPolicyCommands();
+    respond(bridge, id, lastPayload(a.sent).id as number, {});
+    await expect(restoring).resolves.toMatchObject({ enabled: false, known: true });
+  });
+
+  it("rejects unlocked or stale target commands without sending", async () => {
+    const bridge = new CdpBridge(); const a = peer(); const b = peer();
+    const id = bridge.addMiniapp(a.value); const other = bridge.addMiniapp(b.value);
+    await expect(bridge.setSkipAllPauses(other, true)).rejects.toThrow("目标已变化");
+    bridge.setLock(false);
+    await expect(bridge.setSkipAllPauses(id, true)).rejects.toThrow("锁定");
+    expect(a.sent).toHaveLength(0); expect(b.sent).toHaveLength(0);
+  });
+
+  it("surfaces CDP errors and does not advertise success", async () => {
+    const bridge = new CdpBridge(); const a = peer(); const id = bridge.addMiniapp(a.value);
+    const pending = bridge.setSkipAllPauses(id, true);
+    bridge.receiveMiniapp(encodeCdpMessage({ sequence: 1, category: "chromeDevtoolsResult",
+      operationId: 1, payload: JSON.stringify({ id: lastPayload(a.sent).id, error: { code: -32601, message: "Debugger unsupported" } }), jsContextId: "" }), id);
+    await expect(pending).rejects.toThrow("Debugger unsupported");
+    expect(bridge.pausePolicy()).toMatchObject({ known: false, busy: false, error: "Debugger unsupported" });
+  });
+
+  it("does not inherit policy across targets or reconnects", async () => {
+    const bridge = new CdpBridge(); const a = peer(); const id = bridge.addMiniapp(a.value);
+    const pending = bridge.setSkipAllPauses(id, true);
+    respond(bridge, id, lastPayload(a.sent).id as number, {}); await flushPolicyCommands();
+    respond(bridge, id, lastPayload(a.sent).id as number, {}); await pending;
+    const other = bridge.addMiniapp(peer().value);
+    bridge.switchMiniapp(other);
+    expect(bridge.pausePolicy()).toMatchObject({ clientId: other, enabled: false, known: false });
+    bridge.switchMiniapp(id);
+    expect(bridge.pausePolicy()).toMatchObject({ enabled: true, known: true });
+    bridge.removeMiniapp(id);
+    expect(bridge.pausePolicy()).toMatchObject({ clientId: null, known: false });
+  });
+
+  it("reconfirms the original connection after a realm reload", async () => {
+    vi.useFakeTimers();
+    try {
+      const bridge = new CdpBridge(); const a = peer(); const id = bridge.addMiniapp(a.value);
+      const pending = bridge.setSkipAllPauses(id, true);
+      respond(bridge, id, lastPayload(a.sent).id as number, {}); await flushPolicyCommands();
+      respond(bridge, id, lastPayload(a.sent).id as number, {}); await pending;
+      bridge.receiveMiniapp(encodeCdpMessage({ sequence: 1, category: "setupContext", operationId: 0, payload: "{}", jsContextId: "" }), id);
+      expect(bridge.pausePolicy()).toMatchObject({ enabled: true, known: false, busy: true });
+      respond(bridge, id, lastPayload(a.sent).id as number, {}); await flushPolicyCommands();
+      expect(lastPayload(a.sent)).toMatchObject({ method: "Debugger.setSkipAllPauses", params: { skip: true } });
+      respond(bridge, id, lastPayload(a.sent).id as number, {}); await flushPolicyCommands();
+      expect(bridge.pausePolicy()).toMatchObject({ enabled: true, known: true, busy: false });
+    } finally { vi.clearAllTimers(); vi.useRealTimers(); }
+  });
+
+  it("does not apply the second command after the lock changes during enable", async () => {
+    vi.useFakeTimers();
+    try {
+      const bridge = new CdpBridge(); const a = peer(); const b = peer();
+      const id = bridge.addMiniapp(a.value); const other = bridge.addMiniapp(b.value);
+      const pending = bridge.setSkipAllPauses(id, true);
+      const rejected = expect(pending).rejects.toThrow("timed out");
+      await expect(bridge.setSkipAllPauses(id, false)).rejects.toThrow("正在设置");
+      bridge.switchMiniapp(other);
+      respond(bridge, id, lastPayload(a.sent).id as number, {});
+      await vi.advanceTimersByTimeAsync(8000);
+      await rejected;
+      expect(a.sent).toHaveLength(1);
+      expect(bridge.pausePolicy()).toMatchObject({ clientId: other, enabled: false, known: false });
+    } finally { vi.clearAllTimers(); vi.useRealTimers(); }
+  });
+
+  it("invalidates acknowledgements changed through DevTools", async () => {
+    const bridge = new CdpBridge(); const a = peer(); const id = bridge.addMiniapp(a.value);
+    const pending = bridge.setSkipAllPauses(id, true);
+    respond(bridge, id, lastPayload(a.sent).id as number, {}); await flushPolicyCommands();
+    respond(bridge, id, lastPayload(a.sent).id as number, {}); await pending;
+    bridge.forwardDevtools(JSON.stringify({ id: 9, method: "Debugger.setSkipAllPauses", params: { skip: false } }));
+    expect(bridge.pausePolicy()).toMatchObject({ known: false, busy: false });
+    expect(bridge.pausePolicy().error).toContain("其他调试命令");
+    const other = bridge.addMiniapp(peer().value);
+    bridge.switchMiniapp(other);
+    bridge.switchMiniapp(id);
+    await flushPolicyCommands();
+    expect(a.sent.map((frame) => JSON.parse(decodeCdpMessage(frame as Buffer)?.payload ?? "{}") as Record<string, unknown>)
+      .filter((command) => command.method === "Debugger.setSkipAllPauses")).toHaveLength(2);
+    expect(bridge.pausePolicy()).toMatchObject({ known: false, busy: false });
+  });
+
+  it("keeps restore available after its command times out", async () => {
+    vi.useFakeTimers();
+    try {
+      const bridge = new CdpBridge(); const a = peer(); const id = bridge.addMiniapp(a.value);
+      const pending = bridge.setSkipAllPauses(id, true);
+      respond(bridge, id, lastPayload(a.sent).id as number, {}); await flushPolicyCommands();
+      respond(bridge, id, lastPayload(a.sent).id as number, {}); await pending;
+      const restoring = bridge.setSkipAllPauses(id, false);
+      const rejected = expect(restoring).rejects.toThrow("timed out");
+      await vi.advanceTimersByTimeAsync(8000); await rejected;
+      expect(bridge.pausePolicy()).toMatchObject({ enabled: true, known: false, busy: false });
+    } finally { vi.clearAllTimers(); vi.useRealTimers(); }
+  });
+
+  it("reconfirms when CDP reports globalObjectCleared without setupContext", async () => {
+    const bridge = new CdpBridge(); const a = peer(); const id = bridge.addMiniapp(a.value);
+    const pending = bridge.setSkipAllPauses(id, true);
+    respond(bridge, id, lastPayload(a.sent).id as number, {}); await flushPolicyCommands();
+    respond(bridge, id, lastPayload(a.sent).id as number, {}); await pending;
+    bridge.receiveMiniapp(encodeCdpMessage({ sequence: 1, category: "chromeDevtoolsResult", operationId: 0,
+      payload: JSON.stringify({ method: "Debugger.globalObjectCleared", params: {} }), jsContextId: "" }), id);
+    expect(bridge.pausePolicy()).toMatchObject({ enabled: true, known: false, busy: true });
+    respond(bridge, id, lastPayload(a.sent).id as number, {}); await flushPolicyCommands();
+    respond(bridge, id, lastPayload(a.sent).id as number, {}); await flushPolicyCommands();
+    expect(bridge.pausePolicy()).toMatchObject({ known: true, busy: false });
+  });
+
+  it("resumes an already paused target before confirming skip mode", async () => {
+    const bridge = new CdpBridge(); const a = peer(); const id = bridge.addMiniapp(a.value);
+    bridge.receiveMiniapp(encodeCdpMessage({ sequence: 1, category: "chromeDevtoolsResult", operationId: 0,
+      payload: JSON.stringify({ method: "Debugger.paused", params: { callFrames: [] } }), jsContextId: "" }), id);
+    const pending = bridge.setSkipAllPauses(id, true);
+    respond(bridge, id, lastPayload(a.sent).id as number, {}); await flushPolicyCommands();
+    respond(bridge, id, lastPayload(a.sent).id as number, {}); await flushPolicyCommands();
+    expect(lastPayload(a.sent).method).toBe("Debugger.resume");
+    expect(bridge.pausePolicy()).toMatchObject({ known: false, busy: true });
+    respond(bridge, id, lastPayload(a.sent).id as number, {});
+    await expect(pending).resolves.toMatchObject({ known: true, enabled: true });
+  });
+
+  it("invalidates background reloads without routing commands there until it is selected", async () => {
+    const bridge = new CdpBridge(); const a = peer(); const id = bridge.addMiniapp(a.value);
+    const pending = bridge.setSkipAllPauses(id, true);
+    respond(bridge, id, lastPayload(a.sent).id as number, {}); await flushPolicyCommands();
+    respond(bridge, id, lastPayload(a.sent).id as number, {}); await pending;
+    const other = bridge.addMiniapp(peer().value);
+    bridge.switchMiniapp(other);
+    const before = a.sent.length;
+    bridge.receiveMiniapp(encodeCdpMessage({ sequence: 1, category: "chromeDevtoolsResult", operationId: 0,
+      payload: JSON.stringify({ method: "Debugger.globalObjectCleared", params: {} }), jsContextId: "" }), id);
+    expect(a.sent).toHaveLength(before);
+    bridge.switchMiniapp(id);
+    expect(bridge.pausePolicy()).toMatchObject({ known: false, busy: true });
+    respond(bridge, id, lastPayload(a.sent).id as number, {}); await flushPolicyCommands();
+    respond(bridge, id, lastPayload(a.sent).id as number, {}); await flushPolicyCommands();
+    expect(bridge.pausePolicy()).toMatchObject({ known: true, enabled: true });
+  });
+});
+
 describe("CdpBridge", () => {
   it("encodes a DevTools command for the connected miniapp", () => {
     const bridge = new CdpBridge();
@@ -894,6 +1092,30 @@ describe("miniapp identity", () => {
       name: "旧版昵称",
       icon: "https://example.com/i.png",
     });
+  });
+
+  it("reads an accessible child frame without requiring the navigator hook", () => {
+    const inaccessible = Object.defineProperty({}, "wx", { get() { throw new Error("cross origin"); } });
+    expect(runIdentity({ frames: [inaccessible, { wx: {}, __wxConfig: {
+      accountInfo: { appId: "wxabc1234567890a", nickname: "子页面昵称", icon: "https://example.com/icon.png" },
+    } }] })).toEqual({ appid: "wxabc1234567890a", name: "子页面昵称", icon: "https://example.com/icon.png" });
+  });
+
+  it("reads a sibling frame through the parent when the current frame has no config", () => {
+    expect(runIdentity({ parent: { frames: [{ wx: {}, __wxConfig: {
+      accountInfo: { appId: "wxabc1234567890a", nickname: "同级页面昵称" },
+    } }] } })).toEqual({ appid: "wxabc1234567890a", name: "同级页面昵称", icon: "" });
+  });
+
+  it("does not use a child frame that has config but no miniapp wx environment", () => {
+    expect(runIdentity({ frames: [{ __wxConfig: { accountInfo: { nickname: "其他网页" } } }] })).toEqual({});
+  });
+
+  it("prefers the current window account API over another frame's identity", () => {
+    expect(runIdentity({
+      wx: { getAccountInfoSync: () => ({ miniProgram: { appId: "wxaaaa1234567890", nickname: "当前目标" } }) },
+      frames: [{ wx: {}, __wxConfig: { accountInfo: { appId: "wxbbbb1234567890", nickname: "其他目标" } } }],
+    })).toEqual({ appid: "wxaaaa1234567890", name: "当前目标", icon: "" });
   });
 
   it("returns nothing when no config is reachable", () => {

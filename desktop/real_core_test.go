@@ -47,6 +47,25 @@ func TestRealCoreBundleSpeaksTheGoContract(t *testing.T) {
 	if status.Frida || status.Miniapp || status.Devtools {
 		t.Fatalf("offline bundle must report no attachments: %+v", status)
 	}
+	var pauseOffline *rpc.CoreError
+	if _, err := client.PausePolicy(ctx, nil, 0); !errors.As(err, &pauseOffline) || pauseOffline.Message != "engine not started" {
+		t.Fatalf("offline pause policy must expose the engine state, not an unknown RPC method: %v", err)
+	}
+	var probeOffline *rpc.CoreError
+	var targetsOffline *rpc.CoreError
+	if _, err := client.Targets(ctx); !errors.As(err, &targetsOffline) || targetsOffline.Message != "engine not started" {
+		t.Fatalf("offline discovery must expose engine state: %v", err)
+	}
+	if _, err := client.ProbeTarget(ctx, 1, "h5-1"); !errors.As(err, &probeOffline) || probeOffline.Message != "engine not started" {
+		t.Fatalf("offline H5 probe must expose engine state: %v", err)
+	}
+	var sessionsOffline, closeOffline *rpc.CoreError
+	if _, err := client.H5Sessions(ctx); !errors.As(err, &sessionsOffline) || sessionsOffline.Message != "engine not started" {
+		t.Fatalf("offline H5 sessions must expose engine state: %v", err)
+	}
+	if err := client.CloseH5(ctx, 1, "h5-1"); !errors.As(err, &closeOffline) || closeOffline.Message != "engine not started" {
+		t.Fatalf("offline H5 close must expose engine state: %v", err)
+	}
 
 	formatted, err := client.CodeFormat(ctx, `{"a":1,"b":[1,2]}`, "json")
 	if err != nil {

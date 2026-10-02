@@ -12,6 +12,48 @@ const offlineRuntime: RuntimeAdapter = {
   status: () => ({ frida: false, miniapp: false, devtools: false }),
 };
 
+describe("pause policy RPC", () => {
+  it("lists H5 window state and validates confirmed release requests", async () => {
+    const bridge = new CdpBridge();
+    const close = vi.spyOn(bridge, "closeH5Target").mockResolvedValue();
+    const app = new CoreApp(new Engine(offlineRuntime), () => bridge);
+    await expect(app.handle({ id: 1, method: "cdp.h5Sessions", params: {} })).resolves.toEqual({ sessions: [] });
+    for (const params of [{ clientId: 0, targetId: "h5" }, { clientId: 1, targetId: "../h5" }, { clientId: "1", targetId: "h5" }]) {
+      await expect(app.handle({ id: 2, method: "cdp.closeH5", params })).rejects.toThrow();
+    }
+    await expect(app.handle({ id: 3, method: "cdp.closeH5", params: { clientId: 7, targetId: "h5" } })).resolves.toEqual({ ok: true });
+    expect(close).toHaveBeenCalledExactlyOnceWith(7, "h5");
+    close.mockRejectedValueOnce(new Error("detach not confirmed"));
+    await expect(app.handle({ id: 4, method: "cdp.closeH5", params: { clientId: 7, targetId: "h5" } })).rejects.toThrow("detach not confirmed");
+  });
+  it("routes target discovery through a source-pinned snapshot", async () => {
+    const bridge = new CdpBridge();
+    const targets = vi.spyOn(bridge, "listTargets").mockResolvedValue({ clientId: 7, locked: true, targets: [] });
+    const app = new CoreApp(new Engine(offlineRuntime), () => bridge);
+    await expect(app.handle({ id: 1, method: "cdp.targets", params: {} })).resolves.toEqual({ clientId: 7, locked: true, targets: [] });
+    expect(targets).toHaveBeenCalledOnce();
+  });
+  it("validates and routes an isolated target probe", async () => {
+    const bridge = new CdpBridge();
+    const probe = vi.spyOn(bridge, "probeTarget").mockResolvedValue({ clientId: 1, targetId: "h5-1", verified: true, released: true });
+    const app = new CoreApp(new Engine(offlineRuntime), () => bridge);
+    for (const params of [{ clientId: 0, targetId: "h5-1" }, { clientId: 1, targetId: "../h5" }, { clientId: 1 }, { clientId: "1", targetId: "h5-1" }]) {
+      await expect(app.handle({ id: 1, method: "cdp.probeTarget", params })).rejects.toThrow("clientId positive integer / targetId");
+    }
+    await expect(app.handle({ id: 1, method: "cdp.probeTarget", params: { clientId: 1, targetId: "h5-1" } })).resolves.toMatchObject({ verified: true, released: true });
+    expect(probe).toHaveBeenCalledExactlyOnceWith(1, "h5-1");
+  });
+  it("reads state without sending commands and rejects malformed writes", async () => {
+    const bridge = new CdpBridge();
+    bridge.addMiniapp({ send: () => {} });
+    const app = new CoreApp(new Engine(offlineRuntime), () => bridge);
+    await expect(app.handle({ id: 1, method: "cdp.pausePolicy", params: {} })).resolves.toMatchObject({ clientId: 1, known: false });
+    for (const params of [{ enabled: "true", clientId: 1 }, { enabled: true }, { enabled: true, clientId: 0 }]) {
+      await expect(app.handle({ id: 2, method: "cdp.pausePolicy", params })).rejects.toThrow("enabled / clientId");
+    }
+  });
+});
+
 function onlineRuntime(): RuntimeAdapter {
   return {
     start: async () => ({ frida: false, miniapp: false, devtools: false }),

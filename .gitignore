@@ -26,6 +26,9 @@ desktop/*.exe
 # Keep intentional frontend packaging notes if any — do not track local DB
 *.sqlite3
 fofamap.sqlite3
+*.db
+*.db-shm
+*.db-wal
 
 # Tooling / worktrees
 .worktrees/

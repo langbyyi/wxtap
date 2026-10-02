@@ -7,6 +7,7 @@
 | [ARCHITECTURE.md](ARCHITECTURE.md) | 生产进程模型、端口、资源布局 |
 | [MODULE_MAP.md](MODULE_MAP.md) | 模块职责与 GUI / MCP 索引 |
 | [FEATURE_MATRIX.md](FEATURE_MATRIX.md) | 功能矩阵（各工作区的前端入口、后端能力与数据策略对照，附端口与验收约束） |
+| [GITHUB_RESEARCH.md](GITHUB_RESEARCH.md) | GitHub 相关实现调研、现有能力对照、集成缺口与开发验收建议 |
 | [MCP.md](MCP.md) | MCP 面接入指南（传输、客户端配置、能力索引） |
 | [DEVELOPMENT.md](DEVELOPMENT.md) | 本地开发、构建与自动化测试 |
 | [RELEASE.md](RELEASE.md) | 发版操作说明（tag 触发 CI 自动构建、产物与清单契约、发版前检查清单与排错） |

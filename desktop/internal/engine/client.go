@@ -373,6 +373,51 @@ func (c *Client) CDPCommand(ctx context.Context, method string, params map[strin
 	return result, nil
 }
 
+// Targets returns an enumeration pinned to the source connection in Core.
+func (c *Client) Targets(ctx context.Context) (map[string]any, error) {
+	var result map[string]any
+	if err := c.call(ctx, "cdp.targets", map[string]any{}, &result); err != nil {
+		return nil, err
+	}
+	return result, nil
+}
+
+// H5Sessions returns the actual lifecycle state of independent H5 windows.
+func (c *Client) H5Sessions(ctx context.Context) (map[string]any, error) {
+	var result map[string]any
+	if err := c.call(ctx, "cdp.h5Sessions", map[string]any{}, &result); err != nil {
+		return nil, err
+	}
+	return result, nil
+}
+
+func (c *Client) CloseH5(ctx context.Context, clientID int64, targetID string) error {
+	return c.call(ctx, "cdp.closeH5", map[string]any{"clientId": clientID, "targetId": targetID}, nil)
+}
+
+// ProbeTarget verifies a page through a temporary session that Core must release.
+func (c *Client) ProbeTarget(ctx context.Context, clientID int64, targetID string) (map[string]any, error) {
+	var result map[string]any
+	if err := c.call(ctx, "cdp.probeTarget", map[string]any{"clientId": clientID, "targetId": targetID}, &result); err != nil {
+		return nil, err
+	}
+	return result, nil
+}
+
+// PausePolicy reads or changes the setting for one explicitly identified locked peer.
+func (c *Client) PausePolicy(ctx context.Context, enabled *bool, clientID int64) (map[string]any, error) {
+	params := map[string]any{}
+	if enabled != nil {
+		params["enabled"] = *enabled
+		params["clientId"] = clientID
+	}
+	var result map[string]any
+	if err := c.call(ctx, "cdp.pausePolicy", params, &result); err != nil {
+		return nil, err
+	}
+	return result, nil
+}
+
 // DebugState is the Core debugger session snapshot (cdp.debug): whether the
 // Debugger domain is enabled, the paused call frames, and the parsed-script
 // list. enable=true also sends Debugger.enable so events start flowing.

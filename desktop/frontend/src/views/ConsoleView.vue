@@ -75,7 +75,7 @@ onBeforeUnmount(() => {
 </script>
 
 <template>
-  <section class="console-view" aria-labelledby="console-title">
+  <section class="console-view page-workbench" aria-labelledby="console-title">
     <PageHeader title="Console 日志" title-id="console-title" />
 
     <p v-if="store.consoleError" class="error" role="alert">{{ store.consoleError }}</p>
@@ -112,3 +112,33 @@ onBeforeUnmount(() => {
     </LogPanel>
   </section>
 </template>
+
+<style scoped>
+.console-view > .error,
+.console-view > .log-panel :deep(.panel-header),
+.console-view > .log-panel :deep(.callout) {
+  flex: none;
+}
+
+.console-view > .log-panel :deep(.log-body) {
+  display: flex;
+  flex: 1 1 auto;
+  min-height: 0;
+}
+
+.console-view > .log-panel :deep(.log-view) {
+  flex: 1 1 auto;
+  max-height: none;
+  min-height: 0;
+}
+
+.console-view > .log-panel :deep(.empty-state) {
+  flex: 1 1 auto;
+}
+
+@media (max-width: 760px) {
+  .console-view > .log-panel :deep(.log-view) {
+    max-height: 32rem;
+  }
+}
+</style>

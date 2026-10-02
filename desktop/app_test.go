@@ -1067,6 +1067,7 @@ func TestShutdownIdempotentWithPollerRunning(t *testing.T) {
 	if app.pollerCancel == nil {
 		t.Fatal("status poller should be cancellable after setup")
 	}
+	pollerDone := app.pollerDone
 	done := make(chan struct{})
 	go func() {
 		app.shutdown(context.Background())
@@ -1080,6 +1081,11 @@ func TestShutdownIdempotentWithPollerRunning(t *testing.T) {
 	}
 	if app.pollerCancel != nil {
 		t.Fatal("shutdown should clear the poller cancel func")
+	}
+	select {
+	case <-pollerDone:
+	default:
+		t.Fatal("shutdown returned before the status poller exited")
 	}
 }
 

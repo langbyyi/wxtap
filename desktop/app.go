@@ -27,6 +27,7 @@ type App struct {
 	ctx           context.Context
 	wailsReady    bool
 	pollerCancel  context.CancelFunc
+	pollerDone    chan struct{}
 	consoleCancel context.CancelFunc
 	mu            sync.Mutex
 	// storageUnavailableWarned 记录降级模式（repo == nil）下那条「存储不可用」
@@ -218,6 +219,8 @@ func (a *App) shutdown(context.Context) {
 	a.mu.Lock()
 	cancelPoller := a.pollerCancel
 	a.pollerCancel = nil
+	pollerDone := a.pollerDone
+	a.pollerDone = nil
 	cancelConsole := a.consoleCancel
 	a.consoleCancel = nil
 	sse := a.mcpSSE
@@ -225,6 +228,9 @@ func (a *App) shutdown(context.Context) {
 	a.mu.Unlock()
 	if cancelPoller != nil {
 		cancelPoller()
+	}
+	if pollerDone != nil {
+		<-pollerDone
 	}
 	if cancelConsole != nil {
 		cancelConsole()

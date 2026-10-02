@@ -60,6 +60,11 @@ func runFakeCoreMain() {
 		_, _ = writer.WriteString(`{"id":` + strconv.FormatInt(id, 10) + `,"result":` + result + "}\n")
 		_ = writer.Flush()
 	}
+	errReply := func(id int64, message string) {
+		payload, _ := json.Marshal(map[string]any{"id": id, "error": map[string]any{"code": 1000, "message": message}})
+		_, _ = writer.Write(append(payload, '\n'))
+		_ = writer.Flush()
+	}
 
 	// Optional request log: a test that has to assert what the shell drove Core
 	// to do (which hooks it installed, in which order) points FAKE_CORE_CALL_LOG
@@ -162,7 +167,40 @@ func runFakeCoreMain() {
 		case "miniapp.switch":
 			reply(req.ID, `{"ok":true}`)
 		case "cdp.command":
+			if response := os.Getenv("FAKE_CORE_CDP_RESPONSE"); response != "" {
+				reply(req.ID, response)
+				continue
+			}
 			reply(req.ID, `{"id":1,"result":{"targetInfos":[{"targetId":"T1","type":"page","title":"demo"}]}}`)
+		case "cdp.targets":
+			if raw := os.Getenv("FAKE_CORE_CDP_RESPONSE"); raw != "" {
+				var response struct {
+					Error *struct {
+						Message string `json:"message"`
+					} `json:"error"`
+					Result struct {
+						TargetInfos json.RawMessage `json:"targetInfos"`
+					} `json:"result"`
+				}
+				_ = json.Unmarshal([]byte(raw), &response)
+				if response.Error != nil {
+					errReply(req.ID, response.Error.Message)
+					continue
+				}
+				if len(response.Result.TargetInfos) == 0 || string(response.Result.TargetInfos) == "null" {
+					errReply(req.ID, "CDP 未返回有效目标清单")
+					continue
+				}
+				reply(req.ID, `{"clientId":1,"locked":true,"targets":`+string(response.Result.TargetInfos)+`}`)
+				continue
+			}
+			reply(req.ID, `{"clientId":1,"locked":true,"targets":[{"targetId":"T1","type":"page","title":"demo"}]}`)
+		case "cdp.probeTarget":
+			reply(req.ID, `{"clientId":1,"targetId":"h5-1","verified":true,"released":true,"url":"https://example.com/test","title":"自有页面","readyState":"complete"}`)
+		case "cdp.h5Sessions":
+			reply(req.ID, `{"sessions":[]}`)
+		case "cdp.closeH5":
+			reply(req.ID, `{"ok":true}`)
 		case "runtime.evaluate":
 			reply(req.ID, `{"value":42}`)
 		case "cloud.scan":

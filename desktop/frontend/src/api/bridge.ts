@@ -67,6 +67,7 @@ export interface BackendBridge {
 }
 
 const supportedMethods = new Set([
+  'debugger.pausePolicy',
   'ak.verify',
   // 资产清单（contracts/assets）：scan 异步受理后由 assets_progress 事件收尾。
   'assets.export',
@@ -148,6 +149,9 @@ const supportedMethods = new Set([
   'shell.openFolder',
   'shell.openUrl',
   'targets.list',
+  'targets.probe',
+  'targets.sessions',
+  'targets.close',
   'traffic.appids',
   'traffic.list',
   'traffic.curl',
@@ -327,6 +331,16 @@ async function browserMock<T>(method: string, params?: Record<string, unknown>):
   if (method === 'config.load') {
     return {} as T;
   }
+
+  if (method === 'debugger.pausePolicy') {
+    return { clientId: null, appid: '', name: '', enabled: false, known: false, busy: false, error: '浏览器预览无法设置真实调试目标的暂停策略' } as T;
+  }
+  if (method === 'targets.probe') {
+    throw new Error('浏览器预览无法验证真实 H5 连接');
+  }
+  if (method === 'targets.sessions') return { sessions: [] } as T;
+  if (method === 'targets.close') throw new Error('浏览器预览无法释放真实 H5 调试会话');
+  if (method === 'shell.openDevtoolsWindow' && params?.client_id !== undefined) throw new Error('浏览器预览无法打开真实 H5 调试窗口');
 
   if (method === 'traffic.appids') {
     // 预览里只有一个示例小程序，计数与流量页的 mock 记录数对齐；name 是

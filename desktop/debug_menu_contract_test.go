@@ -45,6 +45,154 @@ func TestFrontendPortConstantsMatchTheBackend(t *testing.T) {
 	}
 }
 
+func TestPausePolicyRejectsMalformedWritesAndExplainsOfflineState(t *testing.T) {
+	app := NewApp()
+	app.ctx = context.Background()
+	app.dataBase = t.TempDir()
+	t.Setenv("WXTAP_CORE_CMD", "wxtap-missing-node-pause-policy")
+	app.setupIPC()
+	for _, input := range []string{`{"enabled":"true","clientId":1}`, `{"enabled":true}`, `{"enabled":false,"clientId":0}`, `{`} {
+		_, err := app.router.Call(context.Background(), "debugger.pausePolicy", json.RawMessage(input))
+		if err == nil || !strings.Contains(err.Error(), "参数") {
+			t.Fatalf("invalid %s: %v", input, err)
+		}
+	}
+	_, err := app.router.Call(context.Background(), "debugger.pausePolicy", json.RawMessage(`{}`))
+	if err == nil || strings.Contains(err.Error(), "unsupported backend method") {
+		t.Fatalf("offline read must explain missing engine: %v", err)
+	}
+}
+
+func TestTargetDiscoveryDistinguishesEmptyResultsFromCDPErrors(t *testing.T) {
+	for _, test := range []struct {
+		name, response, errorText string
+		count                     int
+	}{
+		{"unsupported", `{"id":1,"error":{"code":-32601,"message":"Target.getTargets unsupported"}}`, "Target.getTargets unsupported", 0},
+		{"malformed", `{"id":1,"result":{}}`, "未返回有效目标清单", 0},
+		{"null", `{"id":1,"result":{"targetInfos":null}}`, "未返回有效目标清单", 0},
+		{"empty", `{"id":1,"result":{"targetInfos":[]}}`, "", 0},
+		{"h5", `{"id":1,"result":{"targetInfos":[{"targetId":"h5-1","type":"page","title":"自有页面","url":"https://example.com/test"}]}}`, "", 1},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			t.Setenv("FAKE_CORE_CDP_RESPONSE", test.response)
+			app := startFakeCoreApp(t)
+			defer app.shutdown(context.Background())
+			result, err := app.router.Call(context.Background(), "targets.list", json.RawMessage(`{}`))
+			if err != nil {
+				t.Fatal(err)
+			}
+			payload := result.(map[string]any)
+			if targets, ok := payload["targets"].([]any); !ok || len(targets) != test.count {
+				t.Fatalf("target list: %#v", payload)
+			}
+			note, _ := payload["error"].(string)
+			if test.errorText == "" && (payload["clientId"] != float64(1) || payload["locked"] != true) {
+				t.Fatalf("target source identity: %#v", payload)
+			}
+			if (test.errorText == "" && note != "") || (test.errorText != "" && !strings.Contains(note, test.errorText)) {
+				t.Fatalf("discovery error: %q, want %q", note, test.errorText)
+			}
+		})
+	}
+}
+
+func TestTargetProbeValidatesArgumentsAndUsesDedicatedCoreRPC(t *testing.T) {
+	app := startFakeCoreApp(t)
+	defer app.shutdown(context.Background())
+	for _, input := range []string{`{}`, `{"clientId":0,"targetId":"h5"}`, `{"clientId":1,"targetId":"../h5"}`, `{"clientId":1,"targetId":false}`} {
+		_, err := app.router.Call(context.Background(), "targets.probe", json.RawMessage(input))
+		if err == nil || !strings.Contains(err.Error(), "参数") {
+			t.Fatalf("invalid %s: %v", input, err)
+		}
+	}
+	result, err := app.router.Call(context.Background(), "targets.probe", json.RawMessage(`{"clientId":1,"targetId":"h5-1"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	payload, ok := result.(map[string]any)
+	if !ok || payload["targetId"] != "h5-1" || payload["verified"] != true || payload["released"] != true {
+		t.Fatalf("probe contract: %#v", result)
+	}
+}
+
+func TestH5WindowURLNeverFallsBackToTheMiniapp(t *testing.T) {
+	got, err := devtoolsH5InspectorURL(62001, 7, "h5-pay")
+	if err != nil || got != "devtools://devtools/bundled/inspector.html?ws=127.0.0.1:62001/devtools/h5/7/h5-pay" {
+		t.Fatalf("H5 URL: %q, %v", got, err)
+	}
+	for _, input := range []struct {
+		port   int
+		id     int64
+		target string
+	}{
+		{-1, 7, "h5"}, {65536, 7, "h5"}, {31415, 0, "h5"}, {31415, 9007199254740992, "h5"}, {31415, 7, ""}, {31415, 7, "../mini"},
+	} {
+		if value, err := devtoolsH5InspectorURL(input.port, input.id, input.target); err == nil || value != "" {
+			t.Fatalf("invalid H5 parameters must fail: %+v -> %q, %v", input, value, err)
+		}
+	}
+}
+
+func TestH5WindowPreflightRejectsChangedSourcesAndNonWebPages(t *testing.T) {
+	for _, input := range []struct {
+		name, pageType, pageURL string
+		source                  float64
+		locked                  bool
+		valid                   bool
+	}{
+		{"page", "page", "https://example.com/pay", 7, true, true},
+		{"iframe", "iframe", "http://example.com/frame", 7, true, true},
+		{"changed-source", "page", "https://example.com", 8, true, false},
+		{"unlocked", "page", "https://example.com", 7, false, false},
+		{"worker", "worker", "https://example.com/worker", 7, true, false},
+		{"not-ready", "page", "about:blank", 7, true, false},
+		{"miniapp-resource", "page", "https://SERVICEWECHAT.COM/frame", 7, true, false},
+		{"wechat-container", "page", "https://liteapp.weixin.qq.com/", 7, true, false},
+		{"wechat-container-query", "iframe", "https://LITEAPP.WEIXIN.QQ.COM?debug=1", 7, true, false},
+		{"liteapp-content", "page", "https://liteapp.weixin.qq.com/article", 7, true, true},
+		{"different-host", "page", "https://liteapp.weixin.qq.com.example.com/", 7, true, true},
+		{"wechat-article", "page", "https://mp.weixin.qq.com/s/article", 7, true, true},
+	} {
+		t.Run(input.name, func(t *testing.T) {
+			snapshot := map[string]any{"clientId": input.source, "locked": input.locked,
+				"targets": []any{map[string]any{"targetId": "h5-pay", "type": input.pageType, "url": input.pageURL}}}
+			if err := validateH5Snapshot(snapshot, 7, "h5-pay"); (err == nil) != input.valid {
+				t.Fatalf("preflight: %v", err)
+			}
+		})
+	}
+	app := NewApp()
+	app.ctx = context.Background()
+	app.dataBase = t.TempDir()
+	app.setupIPC()
+	for _, input := range []string{`{"client_id":null,"target_id":"h5-pay"}`, `{"client_id":"7","target_id":"h5-pay"}`, `{"client_id":7,"target_id":"../other"}`, `{`} {
+		if _, err := app.router.Call(context.Background(), "shell.openDevtoolsWindow", json.RawMessage(input)); err == nil || !strings.Contains(err.Error(), "参数") {
+			t.Fatalf("invalid H5 window input %s: %v", input, err)
+		}
+	}
+}
+
+func TestH5SessionRoutesExposeStateAndValidateReleaseArguments(t *testing.T) {
+	app := startFakeCoreApp(t)
+	defer app.shutdown(context.Background())
+	for _, input := range []string{`{}`, `{"clientId":0,"targetId":"h5"}`, `{"clientId":1,"targetId":"../h5"}`, `{"clientId":1,"targetId":false}`} {
+		if _, err := app.router.Call(context.Background(), "targets.close", json.RawMessage(input)); err == nil || !strings.Contains(err.Error(), "参数") {
+			t.Fatalf("invalid H5 release %s: %v", input, err)
+		}
+	}
+	if _, err := app.router.Call(context.Background(), "targets.close", json.RawMessage(`{"clientId":1,"targetId":"h5-1"}`)); err != nil {
+		t.Fatal(err)
+	}
+	result, err := app.router.Call(context.Background(), "targets.sessions", json.RawMessage(`{}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if entries, ok := result.(map[string]any)["sessions"].([]any); !ok || len(entries) != 0 {
+		t.Fatalf("session state: %#v", result)
+	}
+}
+
 // pinElectronDetection replaces the well-known-location list for one test, the
 // way pinNodeDetection does for Node.
 //

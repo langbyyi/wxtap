@@ -15,14 +15,14 @@ WxTap 是面向**授权安全测试**的微信小程序调试工具：一个 Wai
 
 ## 能力总览
 
-界面按 7 个分组组织，共 17 个页面。
+界面按 7 个分组组织，共 18 个页面。
 
 | 分组 | 页面 | 作用 |
 | --- | --- | --- |
 | **连接** | 状态 | 配置端口、启停引擎；查看微信宿主、Frida、小程序与 DevTools 的对接状态 |
 | **调试** | 页面路由 · Console 日志 · DevTools · vConsole · 注入脚本 | 当前路由回读与跳转、console 与未捕获错误、独立 DevTools 暂停调试、vConsole 面板、自定义脚本注入 |
-| **流量** | WxAPI · 云函数 · 历史记录 | 实时捕获与重放 `wx.*` 及云函数调用；已落库记录分页回看 |
-| **代码** | 反编译 · 代码浏览 | 从 wxapkg 还原源码并标出敏感信息；按目录与全文检索浏览。页面模板由微信新版编译模板运行时（`__wxCodeSpace__`）生成的小程序无法还原——此类 app 在枚举阶段即被识别并排除出可反编译列表；否则整次还原会中止且不产出任何文件（该失败路径是原子的，不存在「部分成功」） |
+| **流量** | WxAPI · 云函数 · 历史记录 | 实时捕获与重放 `wx.*` 及云函数调用；已落库记录分页回看；HTTP 记录可生成 cURL、经配置的上游代理重放和导出 HAR（审计操作当前限最近 500 条记录窗口） |
+| **代码** | 反编译 · 代码浏览 · 资产清单 | 从 wxapkg 还原源码并标出敏感信息；按目录与全文检索浏览；按小程序汇总代码与流量中的接口、静态资源、WebSocket 和云函数，支持分页筛选及 JSON/TXT/CSV/nuclei/httpx 导出。页面模板由微信新版编译模板运行时（`__wxCodeSpace__`）生成的小程序无法还原——此类 app 在枚举阶段即被识别并排除出可反编译列表；否则整次还原会中止且不产出任何文件（该失败路径是原子的，不存在「部分成功」） |
 | **利用** | SessionKey · 微信 AK | 提取 `session_key` 做 AES 加解密；填 AppID / AppSecret 向官方接口验活 |
 | **系统** | 设置 · MCP 服务 | 运行目录与外部程序路径、版本检查；启动 MCP 服务供外部智能体接入 |
 | **帮助** | 使用帮助 · 交流反馈 | 上手流程与报错处理；反馈渠道与更新说明 |
@@ -164,6 +164,7 @@ wxtap/   # 本地目录名可自定；产品名 WxTap
 - [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) — 进程模型、端口、数据与资源位置
 - [docs/MODULE_MAP.md](docs/MODULE_MAP.md) — 模块职责与 GUI / MCP 索引
 - [docs/FEATURE_MATRIX.md](docs/FEATURE_MATRIX.md) — 功能矩阵（各工作区的前端入口、后端能力与数据策略）
+- [docs/GITHUB_RESEARCH.md](docs/GITHUB_RESEARCH.md) — GitHub 相关项目调研、源码确认的集成缺口与后续开发优先级
 - [docs/MCP.md](docs/MCP.md) — MCP 接入指南（传输、客户端配置、能力面）
 - [docs/PLATFORM.md](docs/PLATFORM.md) — 平台定位与地址表覆盖
 - [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md) — 本地开发、构建与自动化测试

@@ -44,6 +44,45 @@ function handshake(url: string, origin?: string): Promise<"open" | "rejected"> {
 }
 
 describe("WmpfSocketServers", () => {
+  it("serves an H5 page endpoint with isolated response ids and releases it on socket close", async () => {
+    const bridge = new CdpBridge();
+    servers = new WmpfSocketServers(bridge, { debugPort: 0, cdpPort: 0 });
+    const ports = await servers.start();
+    const miniapp = await open(`ws://127.0.0.1:${ports.debugPort}`);
+    const target = { targetId: "h5-pay", type: "page", url: "https://example.com/pay", title: "支付页" };
+    const commands: Record<string, unknown>[] = [];
+    miniapp.on("message", (data) => {
+      const command = JSON.parse(decodeCdpMessage(data as Buffer)?.payload ?? "{}"); commands.push(command);
+      const result = command.method === "Target.getTargets" ? { targetInfos: [target] }
+        : command.method === "Target.attachToTarget" ? { sessionId: "h5-session" }
+        : command.method === "Runtime.evaluate" ? { result: { value: { ...target, readyState: "complete", hasDocument: true } } } : {};
+      miniapp.send(encodeCdpMessage({ sequence: 1, category: "chromeDevtoolsResult", operationId: command.id,
+        payload: JSON.stringify({ id: command.id, result, ...(command.sessionId ? { sessionId: command.sessionId } : {}) }), jsContextId: "" }));
+    });
+    const legacy = await open(`ws://127.0.0.1:${ports.cdpPort}`); const leaked: unknown[] = [];
+    legacy.on("message", (message) => leaked.push(message));
+    const h5 = await open(`ws://127.0.0.1:${ports.cdpPort}/devtools/h5/1/h5-pay`);
+    const response = nextMessage(h5); h5.send('{"id":1,"method":"Network.enable"}');
+    expect(JSON.parse((await response).toString())).toEqual({ id: 1, result: {} });
+    expect(commands).toContainEqual(expect.objectContaining({ method: "Network.enable", sessionId: "h5-session" }));
+    expect(leaked).toHaveLength(0);
+    h5.close();
+    for (let n = 0; n < 100 && bridge.h5Sessions()[0]?.active; n++) await new Promise((resolve) => setTimeout(resolve, 5));
+    expect(bridge.h5Sessions()).toMatchObject([{ state: "closed", active: false }]);
+    expect(commands).toContainEqual(expect.objectContaining({ method: "Target.detachFromTarget" }));
+    miniapp.close(); legacy.close();
+  });
+
+  it('rejects malformed H5 endpoint paths without routing to the miniapp', async () => {
+    servers = new WmpfSocketServers(new CdpBridge(), { debugPort: 0, cdpPort: 0 });
+    const ports = await servers.start();
+    for (const path of ['/devtools/h5/0/page', '/devtools/h5/1/..%2Fother', '/devtools/h5/1', '/devtools/h5/9007199254740992/page']) {
+      const socket = new WebSocket(`ws://127.0.0.1:${ports.cdpPort}${path}`);
+      const closed = new Promise<number>((resolve) => socket.once('close', resolve));
+      expect(await closed).toBe(1008);
+    }
+  });
+
   it("bridges CDP text and WMPF binary data on loopback-only servers", async () => {
     servers = new WmpfSocketServers(new CdpBridge(), { debugPort: 0, cdpPort: 0 });
     const ports = await servers.start();

@@ -1,7 +1,9 @@
 import { decodeCdpMessage, encodeCdpMessage } from "../protocol/wmpf-codec.js";
+import { H5Sessions, H5_PAGE_INFO_EXPRESSION, isH5Page } from "./h5-sessions.js";
 
 export type Peer = {
   send(message: Buffer | string): void;
+  close?(code?: number, reason?: string): void;
 };
 
 export type MiniappEntry = {
@@ -13,10 +15,14 @@ export type MiniappEntry = {
 
 export type AppInfo = { appid: string; name: string; icon?: string };
 
+type PausePolicy = { enabled: boolean; known: boolean; busy: boolean; error: string };
+export type PausePolicyState = PausePolicy & { clientId: number | null; appid: string; name: string };
+
 type PendingCommand = {
   resolve(value: Record<string, unknown>): void;
   reject(reason: Error): void;
   timeout: ReturnType<typeof setTimeout>;
+  isolated?: { clientId: number; sessionId: string; method: string };
 };
 
 /** One parsed script the target reported via Debugger.scriptParsed. */
@@ -75,11 +81,11 @@ export type CdpBridgeOptions = {
 
 /** Identity probe: read the account nickname from the miniapp's own config.
  * WMPF puts the display name on accountInfo (nickname/nickName + icon), and on
- * current builds the config lives only on nav.wxFrame: the page-level
- * window.__wxConfig is undefined there, which is what used to leave the target
- * title ("AppIndex") standing in as the name. Older builds carry the same
+ * current builds the config lives on a child frame: nav.wxFrame points to it
+ * after the navigator hook is installed. Before then, inspect accessible
+ * frames directly; the page-level window.__wxConfig is undefined. Older builds carry the same
  * fields one level deeper, under accountInfo.appAccount / appContactInfo. */
-export const APP_INFO_EXPRESSION = "(function(){function s(v){return typeof v==='string'?v:''}function nameOf(c){var ai=c.accountInfo||{};var aa=ai.appAccount||{};var ac=c.appContactInfo||{};return s(ai.nickname)||s(ai.nickName)||s(aa.nickname)||s(aa.nickName)||s(ac.nickname)||s(ac.nickName)||s(c.appname)||s(c.appName)||s(c.nickname)||s(c.nickName)}function iconOf(c){var ai=c.accountInfo||{};var aa=ai.appAccount||{};var ac=c.appContactInfo||{};return s(ai.icon)||s(aa.icon)||s(ac.icon)||s(ac.iconUrl)}function cfg(){try{var f=window.nav&&window.nav.wxFrame;if(f&&f.__wxConfig)return f.__wxConfig}catch(e){}try{if(window.__wxConfig)return window.__wxConfig}catch(e){}try{if(window.wx&&window.wx.__wxConfig)return window.wx.__wxConfig}catch(e){}try{var p=window.parent;if(p&&p!==window&&p.__wxConfig)return p.__wxConfig}catch(e){}return null}try{var c=cfg();if(c){var ai=c.accountInfo||{};var aa=ai.appAccount||{};return JSON.stringify({appid:s(aa.appId)||s(ai.appId)||s(c.appid),name:nameOf(c),icon:iconOf(c)})}var info=window.wx&&window.wx.getAccountInfoSync&&window.wx.getAccountInfoSync();var mp=info&&info.miniProgram;if(mp&&mp.appId)return JSON.stringify({appid:s(mp.appId),name:s(mp.nickname)||s(mp.nickName),icon:s(mp.icon)});return JSON.stringify({})}catch(e){return JSON.stringify({})}})()";
+export const APP_INFO_EXPRESSION = "(function(){function s(v){return typeof v==='string'?v:''}function nameOf(c){var ai=c.accountInfo||{};var aa=ai.appAccount||{};var ac=c.appContactInfo||{};return s(ai.nickname)||s(ai.nickName)||s(aa.nickname)||s(aa.nickName)||s(ac.nickname)||s(ac.nickName)||s(c.appname)||s(c.appName)||s(c.nickname)||s(c.nickName)}function iconOf(c){var ai=c.accountInfo||{};var aa=ai.appAccount||{};var ac=c.appContactInfo||{};return s(ai.icon)||s(aa.icon)||s(ac.icon)||s(ac.iconUrl)}function frameCfg(w){try{var fs=w&&w.frames;for(var i=0;fs&&i<fs.length;i++){try{var f=fs[i];if(f.wx&&f.__wxConfig)return f.__wxConfig}catch(e){}}}catch(e){}return null}function cfg(){try{var f=window.nav&&window.nav.wxFrame;if(f&&f.__wxConfig)return f.__wxConfig}catch(e){}try{if(window.__wxConfig)return window.__wxConfig}catch(e){}try{if(window.wx&&window.wx.__wxConfig)return window.wx.__wxConfig}catch(e){}try{var p=window.parent;if(p&&p!==window&&p.__wxConfig)return p.__wxConfig}catch(e){}return null}try{var c=cfg();if(!c){try{var info=window.wx&&window.wx.getAccountInfoSync&&window.wx.getAccountInfoSync();var mp=info&&info.miniProgram;if(mp&&mp.appId)return JSON.stringify({appid:s(mp.appId),name:s(mp.nickname)||s(mp.nickName),icon:s(mp.icon)})}catch(e){}c=frameCfg(window);if(!c)try{c=frameCfg(window.parent)}catch(e){}}if(c){var ai=c.accountInfo||{};var aa=ai.appAccount||{};return JSON.stringify({appid:s(aa.appId)||s(ai.appId)||s(c.appid),name:nameOf(c),icon:iconOf(c)})}return JSON.stringify({})}catch(e){return JSON.stringify({})}})()";
 
 /** Target titles that are the shell, not the miniapp's own name. AppIndex and
  * GameIndex are WMPF's names for the appservice page frame itself (the mini
@@ -115,6 +121,13 @@ export class CdpBridge {
 
   private readonly consoleEnabled = new Set<number>();
   private readonly debuggerEnabled = new Set<number>();
+  private readonly pausePolicies = new Map<number, PausePolicy>();
+  private readonly reloadedPausePolicies = new Set<number>();
+  private readonly pausedPeers = new Set<number>();
+  private readonly probeSessions = new Map<number, string>();
+  private readonly retiredProbeSessions = new Map<number, Set<string>>();
+  private readonly probesInFlight = new Set<number>();
+  private readonly probeAttachments = new Map<number, { clientId: number; targetId: string; sessionId?: string; released?: boolean }>();
   // 页内 console 钩子对本 realm 的覆盖范围：errors 在 install() 成功后即成立
   // （hookErrors 无条件挂载），full 还要求 console.* 本身包得上（WMPF 锁住
   // console 时页内只剩错误钩子）。CDP 事件源对页内已覆盖的类别不再重复上报。
@@ -134,14 +147,30 @@ export class CdpBridge {
   private readonly pending = new Map<number, PendingCommand>();
   private nextSequence = 0;
   private nextCommandId = 80000;
+  // A disjoint CDP id range keeps even timed-out probe replies private
+  // without retaining an unbounded history of completed commands.
+  private nextProbeCommandId = 1_000_000_000;
   private nextClientId = 0;
   private pageGeneration = 0;
   private lockEnabled = true;
   private lockedClientId: number | undefined;
   private readonly probeDelayMs: number;
+  private readonly h5: H5Sessions;
 
   constructor(options: CdpBridgeOptions = {}) {
     this.probeDelayMs = options.probeDelayMs ?? 1500;
+    this.h5 = new H5Sessions({
+      generation: (clientId) => {
+        if (!this.miniapps.has(clientId) || !this.lockEnabled || this.lockedClientId !== clientId) throw new Error("H5 来源连接已变化，请锁定目标后刷新");
+        return this.pageGeneration;
+      },
+      allocateId: () => this.nextProbeCommandId++,
+      send: (clientId, packet) => {
+        const entry = this.miniapps.get(clientId);
+        if (!entry) throw new Error("H5 来源连接已断开");
+        this.sendTo(entry.peer, JSON.stringify(packet), packet.id as number);
+      },
+    });
   }
 
   /** Registers a miniapp connection; the newest one becomes the lock target
@@ -161,6 +190,22 @@ export class CdpBridge {
   }
 
   removeMiniapp(id: number): void {
+    this.h5.invalidate(id, "H5 来源连接已断开", true);
+    this.probeSessions.delete(id);
+    this.retiredProbeSessions.delete(id);
+    for (const [commandId, attachment] of this.probeAttachments) {
+      if (attachment.clientId === id) this.probeAttachments.delete(commandId);
+    }
+    for (const [commandId, pending] of this.pending) {
+      if (pending.isolated?.clientId === id) {
+        clearTimeout(pending.timeout);
+        this.pending.delete(commandId);
+        pending.reject(new Error("H5 验证连接已断开"));
+      }
+    }
+    this.pausedPeers.delete(id);
+    this.pausePolicies.delete(id);
+    this.reloadedPausePolicies.delete(id);
     this.consoleEnabled.delete(id);
     this.debuggerEnabled.delete(id);
     if (this.miniapps.delete(id) && this.lockedClientId === id) {
@@ -189,6 +234,7 @@ export class CdpBridge {
     // status poller reinstall hooks in the newly selected realm.
     const switching = this.lockedClientId !== id;
     if (switching) {
+      if (this.lockedClientId !== undefined) this.h5.invalidate(this.lockedClientId, "锁定目标已切换");
       this.pageGeneration += 1;
       // 页内覆盖标志描述的是旧锁定 realm：新 realm 还没装过页内钩子，不清零的
       // 话 CDP 事件源会按旧状态丢掉新 realm 的 console 事件，直到重装才自愈。
@@ -203,12 +249,14 @@ export class CdpBridge {
     // 同理 console：后台连接当时可能没 enable 成功（回复被锁定过滤等），切换
     // 成为主目标这一刻补一次 enable（每连接只发一次，已启用时是空操作）。
     this.enableConsoleEvents(id);
+    if (this.reloadedPausePolicies.has(id)) this.reconfirmPausePolicy(id);
     return true;
   }
 
   setLock(enabled: boolean): void {
     this.lockEnabled = enabled;
     if (!enabled) {
+      if (this.lockedClientId !== undefined) this.h5.invalidate(this.lockedClientId, "小程序连接已解锁");
       this.lockedClientId = undefined;
       // 解锁后事件来自所有连接：旧 realm 的覆盖状态对新来源一无所知，
       // 宁可让 CDP 多报（有 hook.install 的回执再压回去），也不能漏报。
@@ -225,6 +273,9 @@ export class CdpBridge {
         this.pageGeneration += 1;
         this.resetConsolePageCoverage();
       }
+    }
+    if (this.lockedClientId !== undefined && this.reloadedPausePolicies.has(this.lockedClientId)) {
+      this.reconfirmPausePolicy(this.lockedClientId);
     }
   }
 
@@ -261,8 +312,17 @@ export class CdpBridge {
     this.devtools.delete(peer);
   }
 
+  addH5Devtools(peer: Peer, clientId: number, targetId: string): Promise<void> {
+    if (this.probesInFlight.has(clientId)) return Promise.reject(new Error("该连接正在验证 H5，请稍后重试"));
+    return this.h5.open(peer, clientId, targetId);
+  }
+  forwardH5Devtools(peer: Peer, payload: string): void { this.h5.forward(peer, payload); }
+  removeH5Devtools(peer: Peer): Promise<void> { return this.h5.disconnect(peer); }
+  h5Sessions() { return this.h5.list(); }
+  closeH5Target(clientId: number, targetId: string): Promise<void> { return this.h5.closeTarget(clientId, targetId); }
+
   connectionStatus(): { miniapp: boolean; devtools: boolean } {
-    return { miniapp: this.miniapps.size > 0, devtools: this.devtools.size > 0 };
+    return { miniapp: this.miniapps.size > 0, devtools: this.devtools.size > 0 || this.h5.connected() };
   }
 
   generation(): number {
@@ -270,10 +330,32 @@ export class CdpBridge {
   }
 
   forwardDevtools(payload: string): void {
+    const command = parseObject(payload);
+    if (typeof command?.id === "number" && command.id >= 1_000_000_000) {
+      this.broadcast(JSON.stringify({ id: command.id, error: { code: -32600, message: "CDP 命令 ID 位于内部验证保留区间，请使用小于 1000000000 的非负整数" } }));
+      return;
+    }
+    if (command?.method === "Target.attachToTarget" && isRecord(command.params) && this.probeOwnsTarget(textOf(command.params.targetId))) {
+      this.broadcast(JSON.stringify({ id: command.id, error: { code: -32000, message: "该 H5 目标正在验证连接" } }));
+      return;
+    }
+    if (command?.method === "Target.attachToTarget" && isRecord(command.params) && this.lockedClientId !== undefined &&
+      this.h5.owns(this.lockedClientId, textOf(command.params.targetId))) {
+      this.broadcast(JSON.stringify({ id: command.id, error: { code: -32000, message: "该目标已有独立 H5 调试会话，请先断开调试" } }));
+      return;
+    }
+    if (command !== undefined) this.invalidateExternalPauseCommand(textOf(command.method));
     this.sendToActive(payload, this.nextCommandId++);
   }
 
   sendCommand(method: string, params: Record<string, unknown>, timeoutMs: number): Promise<Record<string, unknown>> {
+    if (method === "Target.attachToTarget" && this.lockedClientId !== undefined && this.h5.owns(this.lockedClientId, textOf(params.targetId))) {
+      return Promise.reject(new Error("该目标已有独立 H5 调试会话，请先断开调试"));
+    }
+    if (method === "Target.attachToTarget" && this.probeOwnsTarget(textOf(params.targetId))) {
+      return Promise.reject(new Error("该 H5 目标正在验证连接"));
+    }
+    this.invalidateExternalPauseCommand(method);
     if (this.miniapps.size === 0) {
       return Promise.reject(new Error("no miniapp connected"));
     }
@@ -302,6 +384,8 @@ export class CdpBridge {
       return;
     }
     if (message.category === "setupContext" && clientId !== undefined) {
+      this.h5.invalidate(clientId, "小程序页面上下文已重建");
+      this.pausedPeers.delete(clientId);
       // Only the active realm drives hook auto-injection. A background
       // miniapp refreshing must not make the status poller reinstall hooks
       // in the locked realm.
@@ -314,9 +398,73 @@ export class CdpBridge {
       this.resetConsolePageCoverage();
       this.scheduleIdentityProbe(clientId);
       this.enableConsoleEvents(clientId);
+      this.reconfirmPausePolicy(clientId);
     }
     if (message.category !== "chromeDevtoolsResult") {
       return;
+    }
+    const response = parseObject(message.payload);
+    if (response !== undefined && clientId !== undefined && this.h5.receive(clientId, response)) return;
+    if (response !== undefined) {
+      if (response.method === "Target.attachedToTarget" && isRecord(response.params) && isRecord(response.params.targetInfo)) {
+        const targetId = textOf(response.params.targetInfo.targetId);
+        const attachment = [...this.probeAttachments.values()].find((entry) => entry.clientId === clientId && entry.targetId === targetId);
+        const sessionId = textOf(response.params.sessionId);
+        if (attachment !== undefined && sessionId !== "") {
+          if (this.retiredProbeSessions.get(attachment.clientId)?.has(sessionId)) return;
+          attachment.sessionId = sessionId;
+          this.probeSessions.set(attachment.clientId, sessionId);
+          this.scheduleProbeRelease(attachment.clientId);
+          return;
+        }
+      }
+      const pending = typeof response.id === "number" ? this.pending.get(response.id) : undefined;
+      const attachment = typeof response.id === "number" ? this.probeAttachments.get(response.id) : undefined;
+      if (attachment !== undefined && attachment.clientId === clientId && textOf(response.sessionId) === "") {
+        this.probeAttachments.delete(response.id as number);
+        const sessionId = isRecord(response.result) ? textOf(response.result.sessionId) : "";
+        if (sessionId !== "" && !(attachment.released && attachment.sessionId === sessionId)) {
+          this.probeSessions.set(attachment.clientId, sessionId);
+          if (pending === undefined) this.scheduleProbeRelease(attachment.clientId);
+        }
+      }
+      if (typeof response.id === "number" && response.id >= 1_000_000_000) {
+        if (pending?.isolated !== undefined && clientId === pending.isolated.clientId && textOf(response.sessionId) === pending.isolated.sessionId) {
+          clearTimeout(pending.timeout);
+          this.pending.delete(response.id);
+          pending.resolve(response);
+        }
+        return;
+      }
+      const session = clientId === undefined ? undefined : this.probeSessions.get(clientId);
+      const eventSession = textOf(response.sessionId) || (isRecord(response.params) ? textOf(response.params.sessionId) : "");
+      if (clientId !== undefined && this.retiredProbeSessions.get(clientId)?.has(eventSession)) return;
+      if (session !== undefined && response.method === "Target.detachedFromTarget" && isRecord(response.params) && response.params.sessionId === session) {
+        this.retireProbeSession(clientId as number, session);
+        for (const attachment of this.probeAttachments.values()) {
+          if (attachment.clientId === clientId && attachment.sessionId === session) attachment.released = true;
+        }
+        for (const [commandId, pending] of this.pending) {
+          if (pending.isolated !== undefined && pending.isolated.clientId === clientId && pending.isolated.sessionId === session) {
+            clearTimeout(pending.timeout);
+            this.pending.delete(commandId);
+            pending.reject(new Error("H5 临时会话已关闭"));
+          }
+        }
+        return;
+      }
+      if (session !== undefined && (response.sessionId === session ||
+        (isRecord(response.params) && response.params.sessionId === session))) return;
+    }
+    // Peer-private lifecycle facts remain relevant even while another peer
+    // owns the lock. They must not be broadcast to that other peer's DevTools.
+    if (clientId !== undefined && response !== undefined) {
+      if (response.method === "Debugger.paused") this.pausedPeers.add(clientId);
+      if (response.method === "Debugger.resumed") this.pausedPeers.delete(clientId);
+      if (response.method === "Debugger.globalObjectCleared") {
+        this.pausedPeers.delete(clientId);
+        this.reconfirmPausePolicy(clientId);
+      }
     }
     // Locking is an isolation boundary, not only an outbound routing rule:
     // unsolicited results from another miniapp must not reach DevTools or
@@ -325,7 +473,6 @@ export class CdpBridge {
       return;
     }
     this.broadcast(message.payload);
-    const response = parseObject(message.payload);
     if (response === undefined) {
       return;
     }
@@ -426,6 +573,217 @@ export class CdpBridge {
       // 与 console 同一策略：启用失败只意味着拿不到调试事件，不拖垮其它功能。
       this.debuggerEnabled.delete(id);
     });
+  }
+
+  /** Enumerate one connection and return its identity with the same snapshot. */
+  async listTargets(): Promise<{ clientId: number; locked: boolean; targets: unknown[] }> {
+    const clientId = this.activeDebugTarget();
+    if (clientId === undefined) throw new Error("no miniapp connected");
+    const generation = this.pageGeneration;
+    const locked = this.lockEnabled && this.lockedClientId === clientId;
+    const response = await this.sendCommandTo(clientId, "Target.getTargets", {}, 8000, "", true).catch((error: unknown) => {
+      if (!this.miniapps.has(clientId)) throw new Error("调试目标连接已断开");
+      throw error;
+    });
+    if (generation !== this.pageGeneration || this.activeDebugTarget() !== clientId ||
+      locked !== (this.lockEnabled && this.lockedClientId === clientId)) {
+      throw new Error("目标已变化，请刷新后重试");
+    }
+    if (isRecord(response.error)) throw new Error(textOf(response.error.message, "CDP 目标查询失败"));
+    const result = response.result;
+    if (!isRecord(result) || !Array.isArray(result.targetInfos)) throw new Error("CDP 未返回有效目标清单");
+    return { clientId, locked, targets: result.targetInfos };
+  }
+
+  /** Read-only page probe through a temporary, isolated flattened session. */
+  async probeTarget(clientId: number, targetId: string): Promise<Record<string, unknown>> {
+    if (this.h5.owns(clientId, targetId)) throw new Error("该目标已有 H5 调试会话，请先断开调试");
+    const generation = this.pageGeneration;
+    const checkTarget = () => {
+      if (!this.lockEnabled || this.lockedClientId === undefined) throw new Error("请先锁定一个小程序连接");
+      if (clientId !== this.lockedClientId || !this.miniapps.has(clientId) || generation !== this.pageGeneration) {
+        throw new Error("目标已变化，请刷新后重试");
+      }
+    };
+    checkTarget();
+    if (this.probesInFlight.has(clientId)) throw new Error("H5 连接正在验证，请稍后重试");
+    this.probesInFlight.add(clientId);
+    const send = async (method: string, params: Record<string, unknown>, sessionId = "") => {
+      checkTarget();
+      const response = await this.sendCommandTo(clientId, method, params, 8000, sessionId, true);
+      if (isRecord(response.error)) throw new Error(`${method}: ${textOf(response.error.message, "CDP 命令失败")}`);
+      if (!isRecord(response.result)) throw new Error(`${method}: CDP 未返回有效回执`);
+      return response.result;
+    };
+    let result: Record<string, unknown> | undefined;
+    let failure = "";
+    try {
+      const leftover = this.probeSessions.get(clientId);
+      if (leftover !== undefined) {
+        await this.releaseProbeSession(clientId);
+      }
+      if ([...this.probeAttachments.values()].some((entry) => entry.clientId === clientId)) {
+        throw new Error("上次附加尚未获得回执，请等待或重新连接小程序后再验证");
+      }
+      const targets = await send("Target.getTargets", {});
+      checkTarget();
+      const target = Array.isArray(targets.targetInfos)
+        ? targets.targetInfos.find((info: unknown) => isRecord(info) && info.targetId === targetId) as Record<string, unknown> | undefined : undefined;
+      if (target === undefined || !isH5Page(target)) {
+        throw new Error("H5 目标不存在或不是可验证的网页，请刷新目标清单");
+      }
+      const attached = await send("Target.attachToTarget", { targetId, flatten: true });
+      const sessionId = textOf(attached.sessionId);
+      if (sessionId === "") throw new Error("Target.attachToTarget: CDP 未返回 sessionId");
+      if (this.retiredProbeSessions.get(clientId)?.has(sessionId)) throw new Error("H5 临时会话已关闭");
+      this.probeSessions.set(clientId, sessionId);
+      checkTarget();
+      const evaluated = await send("Runtime.evaluate", {
+        expression: H5_PAGE_INFO_EXPRESSION,
+        returnByValue: true, throwOnSideEffect: true,
+      }, sessionId);
+      checkTarget();
+      if (isRecord(evaluated.exceptionDetails)) throw new Error("Runtime.evaluate: " + textOf(evaluated.exceptionDetails.text, "页面信息读取失败"));
+      const value: unknown = isRecord(evaluated.result) ? evaluated.result.value : undefined;
+      if (!isRecord(value) || value.hasDocument !== true || typeof value.url !== "string") {
+        throw new Error("Runtime.evaluate: 未返回有效 H5 页面信息");
+      }
+      if (!isH5Page({ type: "page", url: value.url })) {
+        throw new Error("Runtime.evaluate: 执行上下文尚未进入 H5 网页，请加载完成后重新验证");
+      }
+      result = { clientId, targetId, verified: true, released: true, url: value.url, title: textOf(value.title), readyState: textOf(value.readyState) };
+    } catch (error) {
+      failure = error instanceof Error ? error.message : String(error);
+    }
+    try {
+      const sessionId = this.probeSessions.get(clientId);
+      if (sessionId !== undefined) {
+        await this.releaseProbeSession(clientId);
+      }
+    } catch (error) {
+      failure = [failure, `临时会话释放失败：${error instanceof Error ? error.message : String(error)}；再次验证将先重试释放`].filter(Boolean).join("；");
+    } finally {
+      this.probesInFlight.delete(clientId);
+    }
+    if (failure !== "") throw new Error(failure);
+    checkTarget();
+    if (result === undefined) throw new Error("H5 连接验证未完成");
+    return result;
+  }
+
+  private probeOwnsTarget(targetId: string): boolean {
+    return [...this.probeAttachments.values()].some((entry) => entry.targetId === targetId && (!this.lockEnabled || entry.clientId === this.lockedClientId));
+  }
+
+  private scheduleProbeRelease(clientId: number): void {
+    if (this.probesInFlight.has(clientId) || [...this.pending.values()].some((pending) =>
+      pending.isolated?.clientId === clientId && pending.isolated.method === "Target.detachFromTarget")) return;
+    // Failed cleanup remains in probeSessions; the next explicit probe retries it.
+    void this.releaseProbeSession(clientId).catch(() => undefined);
+  }
+
+  private async releaseProbeSession(clientId: number): Promise<void> {
+    const sessionId = this.probeSessions.get(clientId);
+    if (sessionId === undefined) return;
+    try {
+      const response = await this.sendCommandTo(clientId, "Target.detachFromTarget", { sessionId }, 2000, "", true);
+      if (isRecord(response.error)) throw new Error(`Target.detachFromTarget: ${textOf(response.error.message, "CDP 命令失败")}`);
+      if (!isRecord(response.result)) throw new Error("Target.detachFromTarget: CDP 未返回有效回执");
+    } catch (error) {
+      if (!this.miniapps.has(clientId) || this.probeSessions.get(clientId) === sessionId) throw error;
+      // A matching detached event independently confirms the session is gone.
+    }
+    this.retireProbeSession(clientId, sessionId);
+    for (const attachment of this.probeAttachments.values()) {
+      if (attachment.clientId === clientId && attachment.sessionId === sessionId) attachment.released = true;
+    }
+  }
+
+  private retireProbeSession(clientId: number, sessionId: string): void {
+    if (this.probeSessions.get(clientId) === sessionId) this.probeSessions.delete(clientId);
+    let retired = this.retiredProbeSessions.get(clientId);
+    if (retired === undefined) {
+      retired = new Set<string>();
+      this.retiredProbeSessions.set(clientId, retired);
+    }
+    retired.add(sessionId);
+    // Retain recent closed sessions for out-of-order lifecycle events.
+    if (retired.size > 128) retired.delete(retired.values().next().value ?? "");
+  }
+
+  /** Acknowledged settings issued by this bridge, scoped to the locked peer. */
+  pausePolicy(): PausePolicyState {
+    const id = this.lockEnabled ? this.lockedClientId : undefined;
+    const entry = id === undefined ? undefined : this.miniapps.get(id);
+    return {
+      ...(id === undefined ? undefined : this.pausePolicies.get(id)) ?? { enabled: false, known: false, busy: false, error: "" },
+      clientId: entry === undefined ? null : id ?? null,
+      appid: entry?.appid ?? "",
+      name: entry?.name ?? "",
+    };
+  }
+
+  async setSkipAllPauses(clientId: number, enabled: boolean): Promise<PausePolicyState> {
+    if (!this.lockEnabled || this.lockedClientId === undefined) throw new Error("请先锁定一个小程序");
+    if (clientId !== this.lockedClientId || !this.miniapps.has(clientId)) throw new Error("目标已变化，请刷新后重试");
+    if (this.pausePolicies.get(clientId)?.busy) throw new Error("暂停策略正在设置，请稍后重试");
+    this.reloadedPausePolicies.delete(clientId);
+    const previousEnabled = this.pausePolicies.get(clientId)?.enabled ?? false;
+    const policy: PausePolicy = { enabled, known: false, busy: true, error: "" };
+    this.pausePolicies.set(clientId, policy);
+    const checkTarget = () => {
+      if (this.pausePolicies.get(clientId) !== policy || !this.lockEnabled || this.lockedClientId !== clientId) {
+        throw new Error("目标已变化，请刷新后重试");
+      }
+    };
+    try {
+      const send = async (method: string, params: Record<string, unknown>) => {
+        checkTarget();
+        const response = await this.sendCommandTo(clientId, method, params, 8000);
+        checkTarget();
+        if (isRecord(response.error)) throw new Error(textOf(response.error.message, "CDP 暂停策略设置失败"));
+        if (!isRecord(response.result)) throw new Error("CDP 未确认暂停策略，请重试");
+      };
+      await send("Debugger.enable", {});
+      await send("Debugger.setSkipAllPauses", { skip: enabled });
+      if (enabled && this.pausedPeers.has(clientId)) {
+        await send("Debugger.resume", {});
+        this.pausedPeers.delete(clientId);
+      }
+      this.debugWanted = true;
+      this.debuggerEnabled.add(clientId);
+      policy.known = true;
+      policy.busy = false;
+      return this.pausePolicy();
+    } catch (error) {
+      policy.enabled = previousEnabled;
+      policy.error = error instanceof Error ? error.message : String(error);
+      throw error;
+    } finally {
+      policy.busy = false;
+    }
+  }
+
+  private invalidateExternalPauseCommand(method: string): void {
+    if (method !== "Debugger.setSkipAllPauses" && method !== "Debugger.disable") return;
+    for (const [id, policy] of this.pausePolicies) {
+      if (!this.lockEnabled || this.lockedClientId === id) {
+        this.reloadedPausePolicies.delete(id);
+        this.pausePolicies.set(id, { ...policy, known: false, busy: false, error: "暂停设置已被其他调试命令修改，请重新设置确认" });
+      }
+    }
+  }
+
+  private reconfirmPausePolicy(clientId: number): void {
+    const policy = this.pausePolicies.get(clientId);
+    if (policy === undefined || (!policy.known && !policy.busy && !this.reloadedPausePolicies.has(clientId))) return;
+    this.reloadedPausePolicies.add(clientId);
+    // Old acknowledgements do not establish the new realm's setting. Keep
+    // the previous choice on this peer only; a new peer has no policy.
+    this.pausePolicies.set(clientId, { ...policy, known: false, busy: false });
+    if (this.lockEnabled && this.lockedClientId === clientId) {
+      void this.setSkipAllPauses(clientId, policy.enabled).catch(() => undefined);
+    }
   }
 
   /** Snapshot of the debug session on the active target. */
@@ -726,12 +1084,16 @@ export class CdpBridge {
   }
 
   /** Sends a command to one specific miniapp connection. */
-  private sendCommandTo(id: number, method: string, params: Record<string, unknown>, timeoutMs: number, sessionId = ""): Promise<Record<string, unknown>> {
+  private sendCommandTo(id: number, method: string, params: Record<string, unknown>, timeoutMs: number, sessionId = "", isolated = false): Promise<Record<string, unknown>> {
     const entry = this.miniapps.get(id);
     if (entry === undefined) {
       return Promise.reject(new Error("no miniapp connected"));
     }
-    const commandId = this.nextCommandId++;
+    const commandId = isolated ? this.nextProbeCommandId++ : this.nextCommandId++;
+    if (commandId > 2_147_483_647) return Promise.reject(new Error("CDP 命令 ID 已耗尽，请重新连接"));
+    if (isolated && method === "Target.attachToTarget") {
+      this.probeAttachments.set(commandId, { clientId: id, targetId: textOf(params.targetId) });
+    }
     const command: Record<string, unknown> = { id: commandId, method, params };
     if (sessionId !== "") {
       command.sessionId = sessionId;
@@ -743,7 +1105,7 @@ export class CdpBridge {
         this.pending.delete(commandId);
         reject(new Error(`CDP command timed out: ${method}`));
       }, timeoutMs);
-      this.pending.set(commandId, { resolve, reject, timeout });
+      this.pending.set(commandId, { resolve, reject, timeout, ...(isolated ? { isolated: { clientId: id, sessionId, method } } : {}) });
     });
   }
 

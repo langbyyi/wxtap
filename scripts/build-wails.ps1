@@ -199,6 +199,8 @@ $wailsArgs = $wailsBase
 if (-not $binLocked) { $wailsArgs += '-clean' }
 $wailsArgs += @(
     '-s',
+    # Keep the builder's username and checkout paths out of release binaries.
+    '-trimpath',
     '-platform', 'windows/amd64',
     # A Windows installer is what a new user downloads: one file to run, which
     # lays down the directory the app needs. WxTap.exe alone cannot start — it
@@ -348,14 +350,16 @@ $payloadNsi = Join-Path (Split-Path -Parent $nsiProject) 'wxtap-payload.nsi'
 $installerDir = Split-Path -Parent $nsiProject
 Write-Host "Rebuilding the installer with the payload ..."
 # The same defines Wails passes, plus the payload root. Both paths travel as
-# command-line defines rather than sitting in the .nsi: makensis reads the
-# script as ANSI, so a checkout under a non-ASCII path (this one is under 桌面)
-# would otherwise be looked up under the wrong bytes and report no files found.
+# command-line defines rather than path literals in the .nsi, keeping checkout
+# paths independent of the script's input charset.
 #
 # One element per line, no commas: inside @(), a comma binds tighter than "+",
 # so `"a=" + $x, "b=" + $y` collapses into a single concatenated argument and
 # makensis answers with its usage text instead of a script name.
 $nsisArgs = @(
+    # The generated payload script is UTF-8 without a BOM; do not read it as ACP.
+    '-INPUTCHARSET'
+    'UTF8'
     ('-DARG_WAILS_AMD64_BINARY=' + (Join-Path $desktop 'build\bin\WxTap.exe'))
     ('-DARG_WXTAP_PAYLOAD=' + [IO.Path]::GetFullPath($release))
     '-DWAILS_INSTALL_SCOPE=user'

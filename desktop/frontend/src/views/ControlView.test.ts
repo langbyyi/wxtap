@@ -88,6 +88,46 @@ describe('ControlView', () => {
     expect(wrapper.get('[data-testid="frida-status"]').classes()).toContain('connected');
   });
 
+  it('distinguishes attachment, miniapp connection and DevTools connection', async () => {
+    const store = useEngineStore();
+    expect(wrapper.get('[data-testid="connection-diagnosis"]').text()).toContain('引擎未启动');
+    store.starting = true;
+    await wrapper.vm.$nextTick();
+    expect(wrapper.get('[data-testid="connection-diagnosis"]').text()).toContain('正在附加微信');
+    store.starting = false;
+    store.status = { frida: true, miniapp: false, devtools: false };
+    await wrapper.vm.$nextTick();
+    expect(wrapper.get('[data-testid="connection-diagnosis"]').text()).toContain('已附加，等待小程序');
+    store.status.miniapp = true;
+    await wrapper.vm.$nextTick();
+    expect(wrapper.get('[data-testid="connection-diagnosis"]').text()).toContain('小程序已连接，等待 DevTools');
+    store.status.devtools = true;
+    await wrapper.vm.$nextTick();
+    expect(wrapper.get('[data-testid="connection-diagnosis"]').text()).toContain('调试通道已就绪');
+  });
+
+  it('shows recent host load evidence and errors as history and clears them with the log', async () => {
+    const store = useEngineStore();
+    store.logs = [
+      { time: '10:00:01', message: '[hook] scene: 1256' },
+      { time: '10:00:02', message: '[hook] hook scene -> 1101' },
+      { time: '10:00:03', level: 'error', message: 'CDP command timed out: Target.getTargets' },
+      { time: '10:00:04', level: 'info', message: '普通日志' },
+    ];
+    await wrapper.vm.$nextTick();
+    const diagnosis = wrapper.get('[data-testid="connection-diagnosis"]');
+    expect(diagnosis.attributes('title')).toContain('最近宿主加载事件');
+    expect(diagnosis.attributes('title')).toContain('10:00:02');
+    expect(diagnosis.attributes('title')).toContain('[hook] hook scene -> 1101');
+    expect(diagnosis.attributes('title')).toContain('最近错误（历史）');
+    expect(diagnosis.attributes('title')).toContain('CDP command timed out: Target.getTargets');
+    expect(diagnosis.attributes('title')).not.toContain('普通日志');
+    store.logs = [];
+    await wrapper.vm.$nextTick();
+    expect(diagnosis.attributes('title')).not.toContain('Target.getTargets');
+    expect(diagnosis.attributes('title')).toBe('');
+  });
+
   it('shows WeChat as running independently from the debug engine', async () => {
     const store = useEngineStore();
     store.status = { frida: false, miniapp: false, devtools: false, wechatRunning: true };
@@ -104,7 +144,7 @@ describe('ControlView', () => {
     await wrapper.vm.$nextTick();
 
     const labels = wrapper.findAll('.status-card dt').map((item) => item.text());
-    expect(labels).toEqual(['版本支持', '微信', 'Frida 注入']);
+    expect(labels).toEqual(['版本支持', '微信', 'Frida 注入', '调试连接']);
     const host = wrapper.get('[data-testid="wechat-host"]');
     expect(host.text()).toContain('不支持');
     expect(host.get('.status-pill').attributes('title')).toContain('addresses.14161.json');

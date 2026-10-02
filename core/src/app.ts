@@ -82,6 +82,35 @@ export class CoreApp {
         return this.sendCdpCommand(request.params);
       case "cdp.debug":
         return this.debugState(request.params);
+      case "cdp.targets":
+        return this.bridge().listTargets();
+      case "cdp.h5Sessions":
+        return { sessions: this.bridge().h5Sessions() };
+      case "cdp.closeH5": {
+        const { clientId, targetId } = request.params;
+        if (typeof clientId !== "number" || !Number.isSafeInteger(clientId) || clientId <= 0 ||
+          typeof targetId !== "string" || !/^[A-Za-z0-9._-]{1,128}$/.test(targetId)) {
+          throw new RpcFailure(1000, "cdp.closeH5 requires clientId positive integer / targetId", false);
+        }
+        await this.bridge().closeH5Target(clientId, targetId);
+        return { ok: true };
+      }
+      case "cdp.pausePolicy": {
+        if (!("enabled" in request.params)) return this.bridge().pausePolicy();
+        const { enabled, clientId } = request.params;
+        if (typeof enabled !== "boolean" || typeof clientId !== "number" || !Number.isSafeInteger(clientId) || clientId <= 0) {
+          throw new RpcFailure(1000, "cdp.pausePolicy requires boolean enabled / clientId positive integer", false);
+        }
+        return this.bridge().setSkipAllPauses(clientId, enabled);
+      }
+      case "cdp.probeTarget": {
+        const { clientId, targetId } = request.params;
+        if (typeof clientId !== "number" || !Number.isSafeInteger(clientId) || clientId <= 0 ||
+          typeof targetId !== "string" || !/^[A-Za-z0-9._-]{1,128}$/.test(targetId)) {
+          throw new RpcFailure(1000, "cdp.probeTarget requires clientId positive integer / targetId", false);
+        }
+        return this.bridge().probeTarget(clientId, targetId);
+      }
       case "runtime.evaluate":
         return this.evaluate(request.params);
       case "hook.install":

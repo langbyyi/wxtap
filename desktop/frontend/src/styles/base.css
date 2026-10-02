@@ -140,6 +140,7 @@ button, input, textarea, select { font: inherit; color: inherit; }
   grid-template-rows: auto auto minmax(0, 1fr);
   height: 100vh;
   min-width: 0;
+  overflow: hidden;
 }
 
 .app-topbar {
@@ -1026,9 +1027,8 @@ pre {
 }
 
 @media (max-width: 760px) {
-  .app-shell { height: auto; }
   .app-content,
-  .app-content:has(> .page-workbench) { overflow: visible; }
+  .app-content:has(> .page-workbench) { overflow: auto; }
   .app-content > section,
   .app-content > section.page-workbench {
     height: auto;

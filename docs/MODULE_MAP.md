@@ -16,7 +16,7 @@
 | `docs/RELEASE.md` | 发版操作说明（产物、清单契约、验收、排错）。**改发布链路必须同步改它** |
 | `core/src/cli.ts` → `core/dist/cli.js` | Node Core 进程入口（stdio JSON-RPC） |
 
-GUI 方法仍按域命名，已注册的前缀：`engine.*`、`miniapp.*`、`navigator.*`、`traffic.*`、`cloud.*`、`cloudapi.*`、`electron.*`、`wxapi.*`、`console.*`、`extract.*`、`code.*`、`hook.*`、`targets.*`、`sessionkey.*`、`wxopen.*`、`ak.verify`、`config.*`、`settings.*`、`mcp.*`、`update.*`、`shell.*`、`node.*`、`log.*`、`wechat.*`、`fetch.md`、`test.*`（只在测试里注册，不是产品面）。新增方法先在 Go Router 注册稳定名，再补前端与契约测试，并同步 `desktop/frontend/src/api/bridge.ts` 的 `supportedMethods` 白名单 —— 前端导出的 `backend.call` 对白名单外的名字直接抛 `Unsupported backend method`，而 `TestFrontendMethodAllowListMatchesRouter` 要求「Router 注册了就必须被前端调用，或列进该测试的 `backendOnly`」。（这是**前端那一层**的名单；Go 侧 MCP 直通用的 `AppBridge`（`internal/mcp/server.go` 的接口）是另一条通路，它的边界由 `PassThroughTools` 的 `Args` 白名单约束。）
+GUI 方法仍按域命名，已注册的前缀：`engine.*`、`debugger.*`、`miniapp.*`、`navigator.*`、`traffic.*`、`cloud.*`、`cloudapi.*`、`electron.*`、`wxapi.*`、`console.*`、`extract.*`、`code.*`、`hook.*`、`targets.*`、`sessionkey.*`、`wxopen.*`、`ak.verify`、`config.*`、`settings.*`、`mcp.*`、`update.*`、`shell.*`、`node.*`、`log.*`、`wechat.*`、`fetch.md`、`test.*`（只在测试里注册，不是产品面）。新增方法先在 Go Router 注册稳定名，再补前端与契约测试，并同步 `desktop/frontend/src/api/bridge.ts` 的 `supportedMethods` 白名单 —— 前端导出的 `backend.call` 对白名单外的名字直接抛 `Unsupported backend method`，而 `TestFrontendMethodAllowListMatchesRouter` 要求「Router 注册了就必须被前端调用，或列进该测试的 `backendOnly`」。（这是**前端那一层**的名单；Go 侧 MCP 直通用的 `AppBridge`（`internal/mcp/server.go` 的接口）是另一条通路，它的边界由 `PassThroughTools` 的 `Args` 白名单约束。）
 
 ## 核心运行时（生产）
 
@@ -30,6 +30,7 @@ GUI 方法仍按域命名，已注册的前缀：`engine.*`、`miniapp.*`、`nav
 | `desktop/internal/engine` | Go 侧 Core 客户端、日志、拉起 | — |
 | `desktop/internal/navigator` / `cloud` / `extract` / `traffic` | 导航、云、解包扫描、SQLite 流量库 | — |
 | `desktop/internal/devtools` / `cloudapi` | DevTools Electron 启动器定位、云 API HTTP | — |
+| `core/src/bridge/h5-sessions.ts` | 选定 H5 的持续会话、私有命令 ID、iframe/worker 路由与确认释放 | `cdp.h5Sessions` / `cdp.closeH5`、`/devtools/h5/<clientId>/<targetId>` |
 | `desktop/internal/update` | 两条链路：资源增量同步（WMPF Frida 地址表 / MCP skills，从仓库 contents API 匿名读取，按 git blob 名比对内容，无对象存储）；应用自更新（清单 → 分片下载 + sha256 校验 → 解到数据目录 `.update/` → 写待生效标记 → 下次启动换入 + 失败回滚，见 `apply.go`） | 仅标准库 |
 | `desktop/internal/ak` | 公众号 / 小程序 / 企业微信凭据官方接口验活（请求与响应原样返回，不脱敏） | — |
 | `desktop/internal/wxopen` | 官方接口调用台：只读/生成类接口，token 进程内缓存 | `internal/ak` |

@@ -85,16 +85,31 @@ export class WmpfSocketServers {
   }
 
   private attachCdpServer(server: WebSocketServer): void {
-    server.on("connection", (socket) => {
+    server.on("connection", (socket, request) => {
       const peer = asPeer(socket);
-      this.bridge.addDevtools(peer);
+      const path = request.url ?? "/";
+      const h5 = /^\/devtools\/h5\/([1-9]\d*)\/([A-Za-z0-9._-]{1,128})$/.exec(path);
+      if (path.startsWith("/devtools/h5") && (!h5 || !Number.isSafeInteger(Number(h5[1])))) {
+        socket.close(1008, "Invalid H5 endpoint"); return;
+      }
+      if (h5) {
+        socket.once("close", () => { void this.bridge.removeH5Devtools(peer).catch((error: unknown) => console.error(`[core] ${String(error)}`)); });
+        void this.bridge.addH5Devtools(peer, Number(h5[1]), h5[2]).catch((error: unknown) => {
+          if (socket.readyState === WebSocket.OPEN) {
+            socket.send(JSON.stringify({ method: "Inspector.detached", params: { reason: error instanceof Error ? error.message : String(error) } }));
+            socket.close(1011, "H5 connection failed");
+          }
+        });
+      } else this.bridge.addDevtools(peer);
       socket.on("error", () => socket.terminate());
       socket.on("message", (data, isBinary) => {
         if (!isBinary) {
-          this.bridge.forwardDevtools(toBuffer(data).toString("utf8"));
+          const payload = toBuffer(data).toString("utf8");
+          if (h5) this.bridge.forwardH5Devtools(peer, payload);
+          else this.bridge.forwardDevtools(payload);
         }
       });
-      socket.once("close", () => this.bridge.removeDevtools(peer));
+      if (!h5) socket.once("close", () => this.bridge.removeDevtools(peer));
     });
   }
 }
@@ -124,7 +139,7 @@ function isAllowedOrigin(origin: string | undefined): boolean {
 }
 
 function asPeer(socket: WebSocket): Peer {
-  return { send: (message) => socket.send(message) };
+  return { send: (message) => socket.send(message), close: (code, reason) => socket.close(code, reason) };
 }
 
 function toBuffer(data: RawData): Buffer {

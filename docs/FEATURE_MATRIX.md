@@ -10,9 +10,10 @@
 | --- | --- | --- | --- |
 | 连接 | `/control` | `engine.*`、`wechat.status`、`config.*` | 状态事件 + 1 秒微信宿主检测；`/targets` 已并入调试组的 `/devtools` |
 | 捕获 | `/wxapi`、`/cloud` | `wxapi.*`、`cloud.*` | 连接不采集，钩子由「开启捕获」安装，自安装之时起记录；「停止捕获」的顺序是 停投递 → 清页面缓冲 → 卸载钩子 → 清 shell 待投递（已入库的仍在历史记录里）。实时队列有上限；记录带 `rid`，事件与 poll 双路投递幂等（同一 `rid` 只渲染一行）；落定更新流原地覆写状态/正文/耗时，过载时 `*.stats` 报告 shell 与页面侧丢弃 |
-| 数据 | `/traffic` | `traffic.list`、`traffic.getBody`、`traffic.stats`、`traffic.clear`、`traffic.delete` | SQLite 页码分页（最新在前，后端给总数），正文按需读取；勾选批量删除或按 id 删单条之外，可「清空」全部记录（确认框写明条数与不可恢复）；库不再自动裁剪 |
+| 数据 | `/traffic` | `traffic.list`、`traffic.getBody`、`traffic.stats`、`traffic.clear`、`traffic.delete`、`traffic.curl`、`traffic.replay`、`traffic.exportHar` | SQLite 页码分页（最新在前，后端给总数），正文按需读取；勾选批量删除或按 id 删单条之外，可「清空」全部记录（确认框写明条数与不可恢复）；库不再自动裁剪。cURL、HTTP 重放和 HAR 导出当前只读取全库最近 500 条审计窗口，窗口外记录可能在列表可见但无法执行审计操作；重放读取 `replayUpstreamProxy` 配置，落盘导出由 GUI 保存对话框触发 |
 | 调试 | `/navigator`、`/console`、`/devtools`、`/vconsole`、`/hook` | `navigator.*`、`console.*`、`hook.*`、CDP、`engine.vconsole` | 当前路由与拦截状态以后端回读为准（拦截器随页面 realm 消失，须回读校准）；console 环形缓冲有上限。注入脚本可反复重注（文件每次从磁盘重读），成功后行内回显上次落定值/错误与耗时、`stale` 标出「文件在注入后又被改过」，这些是壳侧登记的事实、跨 realm 保留，而 `injected` 随 realm 重建复位；脚本在小程序页面上下文中执行、被包在一层作用域内，其 `console` 带 `[文件名]` 前缀进 Console 页。vConsole 只有开关：面板位于小程序窗口内，本程序无法读取其内容，日志/请求走 Console、WxAPI、云函数、历史记录页 |
 | 分析 | `/extract`、`/code` | `extract.*`、`code.*` | 长任务发出 `task` 事件；命中原文直接展示（本地排查用），脱敏值只用于搜索匹配 |
+| 资产 | `/assets` | `assets.scan`、`assets.list`、`assets.export`；MCP `asset_scan`、`asset_list`、`asset_export` | 按 AppID 合并反编译代码、该小程序最近最多 500 条流量与云函数名称；清单按小程序归档，支持主机/类型/关键词筛选和分页。JSON/TXT/CSV/nuclei/httpx 导出共用后端实现；MCP 导出返回内容，GUI 可通过保存对话框落盘；目标清单不包含完整请求参数或认证信息 |
 | 利用 | `/sessionkey`、`/ak` | `sessionkey.*`、`ak.verify`、`wxopen.*` | 每次调用由用户显式触发；凭据只在内存；官方接口的请求与响应按原文展示；不提供消息类官方接口 |
 | 系统 | `/settings`、`/mcp` | `config.*`、`settings.*`、`mcp.*` | 独立端口与资源路径诊断 |
 | 帮助 | `/faq`、`/feedback` | `fetch.md`（**只服务「交流反馈」页**；「使用帮助」是内置静态内容，不走 IPC） | 内容失败时显示可恢复错误；「交流反馈」另有上次成功内容的本地缓存，拉取失败时仍可读 |
@@ -28,6 +29,13 @@
 
 ## 关键验收约束
 
+- 目标诊断支持类型与标题/URL/ID 的本地筛选，选择目标后按需展示完整信息并复制 JSON；H5 验证保留实际 URL、标题、加载状态与释放确认。清单通过 Core `cdp.targets` 固定到单一连接，返回来源 `clientId` 与锁定状态；切换、解锁和页面代际变化后的旧回执必须失败，前端不得根据另一次 `miniapp.list` 查询推断验证来源。
+
+- DevTools「目标诊断」展示当前 WMPF 通道返回的完整目标清单、类型、标题、URL、目标 ID 与 H5 候选数量；HTTP(S) page/iframe 属候选，worker、小程序资源及 `liteapp.weixin.qq.com/` 根页面的微信容器单独标识。容器不计入 H5 候选，不提供 H5 验证或新建调试入口，后端同步拒绝附加；已有会话仍可断开。查询失败、不支持命令与无效回执必须保留错误，不能显示成成功的空列表。H5 候选不代表会话接入已验证，独立 XWeb 通道不在本批范围内。
+- H5 候选的「验证 H5 连接」通过 `targets.probe` / Core `cdp.probeTarget`，按锁定连接与目标 ID 重新查询、临时 attach、读取实际页面信息并 detach；页面读取与释放均确认后才显示成功。验证命令与会话事件隔离，失败保留阶段错误；已知会话释放失败时下次先重试释放，未确认的 attach 阻止叠加新会话。该入口不建立常驻调试窗口，也不采集 Network。
+- H5 候选的「调试」打开独立 Electron DevTools，经 `/devtools/h5/<clientId>/<targetId>` 只连接选定网页；支持原生脚本、Console、Network 与响应正文，并保留 iframe/worker 子会话路由。`targets.sessions` 回读实际连接状态，「断开」经 `targets.close` 等待释放确认；窗口关闭、目标消失、锁定切换、解锁、重载和来源断开均清理会话，释放失败可重试。最多 16 个同时占用的窗口；每个来源最多保留 4096 条退役会话及 4096 条销毁目标记录，达到上限关闭 H5 窗口并隔离该来源的 flattened 会话事件，需重连调试通道后恢复。Network 在独立 DevTools 中展示，尚未导入 WxTap 流量库；真实微信业务 H5 验收仍待完成，独立 XWeb 不在范围内。
+- H5 导航信息同步：主页面导航及目标信息变化更新会话 URL/标题；加载完成与同文档导航只读回查实际页面，避免使用 CDP 暂存的标题。读取串行进行，导航变化使旧回执作废并触发重读；子 frame 不覆盖主页面信息。当前会话元数据同步到目标列表、筛选和复制结果，URL/标题变化清除旧验证结果；跳转到微信容器后仍能断开，断开后不回退到打开时的 URL。页面信息读取失败保留调试连接并显示具体错误，下一次成功读取清除错误。
+- DevTools「暂停控制」通过 `debugger.pausePolicy` / Core `cdp.pausePolicy` 管理当前锁定小程序：开启会恢复已暂停代码，并跳过后续 `debugger`、正常断点和异常暂停；只有 CDP 回执确认后才显示已设置。重载重新确认，切换与断线不继承策略，失败保留原始错误并允许显式恢复正常暂停。状态代表本工具最近一次确认，外部客户端的设置变更可能使其失效。
 - 历史流量不得一次性加载全部记录；列表使用页码分页，一次只持一页。
 - 请求/响应正文只有在用户查看详情时读取。
 - 异步调用的落定结果（状态、返回正文、耗时）必须能在 drain 之后原地回写；记录身份 `rid` 与 `traffic_records.id` 同源，事件流与 `poll` 双路投递对同一 `rid` 幂等（不得出现重复行）。

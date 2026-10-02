@@ -62,9 +62,39 @@ func newUpdateContractApp(t *testing.T) *App {
 	t.Helper()
 	t.Setenv("WXTAP_DATA_DIR", t.TempDir())
 	app := NewApp()
-	app.ctx = context.Background()
+	ctx, cancel := context.WithCancel(context.Background())
+	app.ctx = ctx
 	app.setupIPC()
+	t.Cleanup(func() {
+		cancel()
+		app.shutdown(context.Background())
+	})
 	return app
+}
+
+func TestUpdateContractAppCleanupStopsBackgroundWork(t *testing.T) {
+	release := make(chan struct{})
+	finished := make(chan struct{})
+	t.Run("download lifecycle", func(t *testing.T) {
+		app := newUpdateContractApp(t)
+		started := make(chan struct{})
+		app.goBackground(func() {
+			close(started)
+			select {
+			case <-app.ctx.Done():
+			case <-release:
+			}
+			close(finished)
+		})
+		<-started
+	})
+	select {
+	case <-finished:
+	default:
+		close(release)
+		<-finished
+		t.Fatal("test cleanup returned before the update background task stopped")
+	}
 }
 
 // A download outlives its request, so the IPC surface has to refuse a second
