@@ -29,8 +29,21 @@ Claude Code 亦可直接执行：`claude mcp add --transport http wxtap http://1
 stdio（无需打开 GUI，由客户端拉起进程）：
 
 ```json
-{ "mcpServers": { "wxtap": { "command": "WxTap.exe", "args": ["-mcp"] } } }
+{
+  "mcpServers": {
+    "wxtap": {
+      "command": "C:/path/to/WxTap/WxTap.exe",
+      "args": ["-mcp"]
+    }
+  }
+}
 ```
+
+将 `command` 改为实际安装目录下的可执行文件绝对路径；上面是占位路径。Windows 默认安装目录为 `%LOCALAPPDATA%\Programs\WxTap`，填写客户端配置时须使用展开后的实际路径，不能假定客户端会展开环境变量。
+
+stdio 模式由 MCP 客户端持有标准输入与输出，收到协议请求才返回 JSON，标准输入结束后退出。直接在 PowerShell 执行 `WxTap.exe -mcp` 可能立即返回提示符，且没有启动提示；这不足以判断是否正常，应以客户端的 `initialize` 回执确认连接。使用 `http://127.0.0.1:9527/mcp` 接入时，需要在 GUI 的「MCP 服务」页启动 HTTP 服务。
+
+在线调试前仍需人工登录微信并先打开小程序，使宿主进程存在。`engine_status.frida` 只表示附加状态，`miniapp` 表示小程序通道，`devtools` 表示外部 DevTools 客户端连接；使用 MCP 不要求先打开独立 DevTools 窗口。GUI 的暂停策略与 H5 会话管理目前没有独立 MCP 工具；不要把 `cdp_command` 当作 H5 通道，它禁止 Target 域，也不接受指定 H5 会话。
 
 ## initialize 与引导
 
@@ -63,8 +76,8 @@ stdio（无需打开 GUI，由客户端拉起进程）：
 `resources/list` 列出两类资源，`resources/read` 按名返回原文（`text/markdown`）：
 
 - `wxtap://reference/hook-records` — wxapi / cloud 钩子记录与落定更新的完整字段 schema（对齐 core/hooks 实现）；
-- `wxtap://reference/engine-errors` — 引擎失败码（no_host / no_ancestor / ambiguous_host / no_version）与前置诊断顺序；
-- `skill://<文件名>` — `resources/skills/` 下的技能文档：会话建立、在线调试、流量审计、代码审计、未授权检测。
+- `wxtap://reference/engine-errors` — 宿主定位的内部失败类型与前置诊断顺序；工具通常返回中文原始错误，不保证文案包含内部类型名；
+- `skill://<文件名>` — `resources/skills/` 下的技能文档：会话建立、在线调试（含导航审计）、流量审计、代码审计。
 
 ### prompts
 

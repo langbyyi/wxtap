@@ -18,9 +18,9 @@
 - [ ] `desktop/build/release/` 发布布局运行 WxTap.exe(或开发布局 `wails dev`),Core 成功拉起(「状态」页可见引擎与 Core 状态)
 - [ ] **权限一致**:附加失败时报错原文会被 Core 保留下来,便于记录。Windows 上常见原因是**完整性级别不匹配**——微信以管理员身份运行时,本程序也要以管理员身份启动(Frida 无法从低完整性级别附加高完整性进程);其次确认安全软件没有拦截注入(随包的 `frida_binding.node` 是约 118 MB 原生模块,且本程序会向微信进程注入代码,是杀软常见误报对象)。上游 `evi0s/WMPFDebugger` 的 FAQ 记录的也是同一原因与同一处理(提升本进程权限)
 
-### macOS(Intel / Apple Silicon)
+### macOS（Apple Silicon；Intel 无地址表，不作为已支持目标）
 
-- [ ] 已安装 Xcode command line tools;PATH 上有 **Node.js 22+**(构建期与运行期都需要:发布包不自带 `runtime/node`,Core 由用户环境里的 Node 启动)
+- [ ] 已安装 **Node.js 22+**（发布包不内置 Node）；从源码构建时另需 Xcode command line tools。独立 DevTools 窗口需可用的 Electron（两平台均可在「设置」页检测与指定路径）
 - [ ] 微信 macOS 版已登录,记录芯片架构(x64 / arm64)与**构建号**——构建号取 `/Applications/WeChat.app/Contents/MacOS/WeChatAppEx.app/Contents/Info.plist` 的 `CFBundleVersion`(Core 读的就是它)。**把该值的原文一并记下**:它是纯整数就直接当构建号,点分(如 `4.269136.0`)则取其中最大的一段——这个格式正是本项目未核实的点之一。确认 `resources/frida/config/mac/addresses.<build>.json` 存在且含对应 `Arch` 段;缺表时 mac 侧**不会**自动检测,会直接报「需补充 …/addresses.<build>.json」
 - [ ] `./scripts/build-wails.sh` 产出 `desktop/build/release/WxTap.app`,资源位于 `Contents/Resources/`;启动后 Core 成功拉起
 - [ ] mac 宿主进程识别正确(优先按主进程所在的 bundle 路径定位 `WeChatAppEx`、其次回落到 `WeChatAppEx Helper` 的父进程;版本按 `Info.plist` 取,见 `core/src/engine/darwin-target.ts` 的 UNVERIFIED 注释),`engine.start` 能完成 attach
@@ -50,7 +50,7 @@
 - [ ] **连接不采集**:连接小程序后不点「开启捕获」,在页面里触发若干 wx.* 调用再打开「WxAPI」页,面板必须恒为「未捕获」且不出现任何记录;此时点「开启捕获」,列表里只出现**点击之后**的调用,不得补投连接以来的积压
 - [ ] **点击即装钩子**:连接小程序后**立即**点「开启捕获」,必须进入「捕获中」并确实收到新记录;不得报「页面未找到可注入的 wx 环境」(该 realm 里找不到 `WeixinJSBridge` 时曾必现)
 - [ ] **停止不复活**:捕获中触发若干调用 → 点「停止捕获」→ 同一个按钮此时写着「开启捕获」,再点它,面板里不得出现停止之前的记录;这批记录仍能在「历史记录」里查到(停止只丢未展示的待投递部分)
-- [ ] **启停是一个开关**:wxapi 捕获 / 云函数捕获 / 云函数 API 服务 / 引擎 / MCP 服务 / vConsole / 页面遍历 **七处**(七个 `StateToggle`),每处都只有**一个**按钮,标签按各页实际用词:开启捕获·停止捕获 / 动态捕获·停止捕获 / 启动服务·停止服务 / 启动引擎·停止引擎 / 启动服务·停止服务 / 开启调试·关闭调试 / 开始遍历·停止访问;不存在第二个同时可见的启停按钮;在飞时该按钮写「…中…」并禁用;开着时点它是停止、关着时点它是开启
+- [ ] **启停是一个开关**:wxapi 捕获 / 云函数捕获 / 云函数 API 服务 / 引擎 / MCP 服务 / vConsole / 页面遍历 **基础七处**（另验暂停策略与 H5 会话的 `StateToggle`）,每处都只有**一个**按钮,标签按各页实际用词:开启捕获·停止捕获 / 动态捕获·停止捕获 / 启动服务·停止服务 / 启动引擎·停止引擎 / 启动服务·停止服务 / 开启调试·关闭调试 / 开始遍历·停止访问;不存在第二个同时可见的启停按钮;在飞时该按钮写「…中…」并禁用;开着时点它是停止、关着时点它是开启
 - [ ] **引擎停止即结束**:捕获中点「停止引擎」(与「启动引擎」是同一个按钮),面板回到「未捕获」;重新启动引擎并连接小程序后**不得**自动开始采集(`wxapi.stats.running` 必须为 false)
 - [ ] **MCP 采集开关**:`hook_start(name=wxapi)` 之后 `hook_drain` 能取到记录,`hook_stop` 之后取不到;`hook_start(name=navigator)` 必须被拒绝
 - [ ] **落定突发不丢**:让 ≥1000 个慢请求在记录已被 drain 之后集中返回,面板里这些行必须都落定为 success/fail 并显示耗时(不出现永久「等待中」),`历史记录` 同步不再是 pending
@@ -81,7 +81,7 @@
 - [ ] **脚本输出可辨认**:注入脚本里的 `console.log` 在 Console 页带 `[文件名]` 前缀;脚本抛错时页内堆栈指向 `wxtap-user-script/文件名`;脚本最后一条表达式是值(或 Promise)时 `lastRun.summary` 给出落定值,而不是恒定的「无返回值」
 - [ ] **console.list / clear**:小程序里 console.log/error、未捕获异常与未处理 Promise 拒绝都能进 `Console 日志` 页;暂停恢复后不丢行不重复;清空后新日志继续进入
 - [ ] **engine.vconsole**:开启/关闭的裁决只认页面回执 —— `setEnableDebug` 的 success/fail 决定 `vconsole_result.ok`,页面没有 `wxFrame` 或直接拒绝都必须报失败(不得因为 RPC 没报错就算「已生效」);面板出现在小程序窗口里,本程序无法读取其内容,要看日志走 Console 页(`Runtime.consoleAPICalled`),不看 `vconsole_result`
-- [ ] **targets.list / targets.attach**:列出页面 target 并可附加
+- [ ] **targets.list / targets.attach**：目标清单来源正确；兼容 IPC `targets.attach` 的成功回执不能当作可用的常驻会话证据，H5 页面读取、窗口接入与释放分别按上面的专门验收项确认
 - [ ] **code.readFile / expandDir / search**:反编译产物目录浏览与全文搜索返回正确内容;产物里的图片（png/jpg/gif/webp 等）点开就显示图片本身,字体、压缩包等二进制文件给出一句说明,而不是输出大量乱码
 
 ## D. 云函数调用与导出

@@ -36,6 +36,8 @@ desktop/ App (Go) ──► internal/api/ipc Router ──► 各域 handler
    - **采集不是连接的副作用**：`wxapi` / `cloud` 钩子由 `*.start` 安装（不在连接时预装），因此连接后的调用既不进页内缓冲也不入库；`*.stop` 顺序为 stop → 清页面缓冲 → 卸载钩子 → 清 shell pending，下次 `*.start` 只记录启用之后的调用。例外是**正在捕获**时 realm 重建：钩子会被重装并把 ack 归 0（新 realm 的 seq 从 1 重来）。`console` 相反，连接即采、常开；契约由 `desktop/capture_lifecycle_contract_test.go` 锁定。
 5. 后端事件经 Wails `EventsEmit` → 前端 `window.__onBackendEvent(...)`（bridge 透传）；Console 页按序号增量拉取 `console.list`，不叠加事件流，避免重复行；WxAPI / 云函数页因为记录带 `rid`，事件与 poll 双路并存也不会重复渲染。
 6. 页面 realm 重建（generation 变化）时 Go 会重装 Hook、丢弃注入登记，并重新注入标记为全局的用户脚本；`window.nav` 的注入缓存同时失效并重建。
+7. 暂停策略由 GUI `debugger.pausePolicy` 转发到 Core `cdp.pausePolicy`，仅写当前锁定连接；Core 直接确认 Debugger 指令，不依赖外部 DevTools 窗口。首次未确认时隐藏状态文字并提供恢复正常暂停，回执确认后才显示策略。
+8. H5 临时验证通过 `targets.probe` → `cdp.probeTarget` 读取页面信息并确认释放；常驻窗口走 `/devtools/h5/<clientId>/<targetId>` 与 `h5-sessions.ts` 的独立会话。每个窗口隔离命令 ID 与子会话消息，导航更新 URL/标题，关闭、目标销毁或来源变化时释放。H5 Network 仅在独立 DevTools 中展示，不写入 WxTap 流量库；独立 XWeb 尚未接入。
 
 ## 数据与资源位置
 

@@ -35,9 +35,11 @@ wxtap/
     PLATFORM.md
     RELEASE.md               # 发版操作说明
     FEATURE_MATRIX.md
+    GITHUB_RESEARCH.md
     MCP.md
     WECHAT_E2E_CHECKLIST.md
     FEEDBACK.md
+    screenshots/             # README 展示截图；仅保留已核查的无敏感数据界面
 ```
 
 ## 约定

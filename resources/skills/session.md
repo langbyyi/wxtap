@@ -2,6 +2,8 @@
 
 一切在线能力的前提。该流程首先是一条顺序约束：连接小程序不等于开启采集。顺序错误不产生报错，只会得到恒空的 `hook_drain` 与空列表。
 
+开始前必须由用户登录微信并先打开自有或已授权小程序，使 WMPF 宿主进程存在；否则 `engine_start` 提示未找到宿主（内部类型为 `no_host`）。仅 Frida 附加成功也不表示小程序通道已经连接。
+
 ## 快速路径：单次调用完成引导
 
 `session_start` 按固定顺序执行：前置检查 → `engine_start` → 选目标（唯一连接自动锁定；多开时传 `target:<id>`）→ 开采集（`hooks` 缺省为 `["wxapi"]`，可追加 `"cloud"`，传 `[]` 表示本轮不采集）→ 汇总快照。引擎与采集两段是幂等的（已在跑即早返回），但**传 `target:<id>` 时并非「什么都不做」**：换目标会重置页面 generation 与两个 feeder 的 ack —— 新目标有自己的页内序号空间。重复调用仍不会产生重复读数：重读的帧由 shell 的去重 FIFO 抑制，面板按 `rid` 原地覆写。
@@ -15,10 +17,10 @@
 仅在需要逐步归因时使用，顺序与快速路径一致。缺省广播的是 lean 目录（只有合并形态与高杠杆工具），本节的 `node_status`、`wechat_status`、`engine_status`、`miniapp_list`、`miniapp_switch`、`engine_stop` 不在其中；第 7 步的 `hook_start` / `hook_drain` 在。不在目录里的照名调用仍然有效。
 
 1. `node_status` — Node 22+ 是所有前置条件的前提。Core 由该运行时启动；不满足时引擎与采集类工具均会报错，归因应从该项开始。
-2. `wechat_status` — 该工具不产生错误：`error` 非空表示检测本身失败；`running:false` 表示微信未运行；`addressTable:false` 是 `engine_start` 返回 `no_version` 的常见原因。区分「微信未运行」与「微信版本不支持」以该项最快。
-3. `engine_start` — 附加 Frida 到微信宿主进程并启动 CDP 代理。幂等，可重复调用。失败时错误中带可读失败码（`no_host` / `no_ancestor` / `ambiguous_host` / `no_version`）；失败码的含义、处置与完整诊断顺序见资源 `wxtap://reference/engine-errors`。
-4. `engine_status` — 确认 `frida:true`。`miniapp` 与 `devtools` 需等到小程序连接后才为 true。
-5. `miniapp_list` — 列出已接入调试桥的小程序。空列表有两种成因（未打开小程序 / 引擎未启动），以 `engine_status` 排除后者。
+2. `wechat_status` — 该工具不产生错误：`error` 非空表示检测本身失败；`running:false` 表示微信未运行；`addressTable:false` 表示静态地址表未覆盖当前构建或架构；仅 Windows 旧布局缺表时可自动检测，其他缺表情况需补表，缺少架构不能正常挂钩。区分「微信未运行」与「微信版本不支持」以该项最快。
+3. `engine_start` — 附加 Frida 到微信宿主进程并启动 CDP 代理。幂等，可重复调用。失败时保留中文原始错误，stdio 可能包装为通用错误码 `1000`，不要假定文案包含 `no_host` 等内部类型；类型含义、处置与完整诊断顺序见资源 `wxtap://reference/engine-errors`。
+4. `engine_status` — 确认 `frida:true` 后再检查 `miniapp:true`；`devtools:true` 表示外部 DevTools 客户端已连接，MCP 调试不要求该状态为 true。
+5. `miniapp_list` — 列出已接入调试桥的小程序。空列表可能表示引擎未启动、小程序未打开或尚未接入调试通道；先用 `engine_status` 区分附加与连接状态。
 6. `miniapp_switch {id}` — 多开时将调试目标固定到其中一个小程序。未知 id 返回 `{ok:false}` 而非报错。切换会重置页面代次：钩子重新安装，标记为 global 的用户脚本重新注入。
 7. `hook_start {name:"wxapi"}` — 云函数审计追加 `hook_start {name:"cloud"}`。
 

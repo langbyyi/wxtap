@@ -11,7 +11,7 @@
 - 应用退出时等待状态轮询结束，再排空后台任务，避免轮询与关闭过程发生竞态；更新下载测试也按同一生命周期清理。
 - 提交和发布产物排除真实目标标识、本地证据、日志与数据库；构建时剥离本机编译路径，更新分片仅包含程序及运行资源。
 
-本版本已完成本地自动化验证与 Windows 发布构建。微信业务 H5、桌面暂停控制完整生命周期和 macOS 实机行为仍待按 [微信验收清单](WECHAT_E2E_CHECKLIST.md)确认；发布不代表这些实机场景已通过验收。
+本版本已完成本地自动化验证、跨平台 CI 与 Windows/macOS 发布构建，正式产物见 [v1.0.4 Release](https://github.com/langbyyi/wxtap/releases/tag/v1.0.4)。微信业务 H5、桌面暂停控制完整生命周期和 macOS 微信实机行为仍待按 [微信验收清单](WECHAT_E2E_CHECKLIST.md)确认；发布不代表这些实机场景已通过验收。
 
 ## 一、交付物：两种形态，各管一段
 
@@ -70,8 +70,9 @@ git push origin v1.1.0
 ```
 
 以上两步可由 `scripts/new-release.ps1` 一并完成：改版本号（含 core 与前端
-package.json 的元数据版本）→ 跑与 ci.yml 同一套本地门禁 → 提交 → 打 annotated
+package.json 的元数据版本）→ 跑本地部分门禁 → 提交 → 打 annotated
 tag → 推送。`pwsh -File scripts/new-release.ps1 -Version 1.1.0 -Notes "说明"`。
+脚本要求工作区干净，运行 Core lint/test、前端 test、Go vet/test，以及 PATH 中可用的 golangci-lint；它不包含 Core 构建、类型检查、覆盖率与 race 全部门禁，执行前仍须完成 §六检查。CI 会另外执行完整矩阵。
 脚本拒绝已存在的 tag；重发一版先删掉它（`gh release delete`、`git push
 origin :refs/tags/<v>`、本地 `git tag -d`），publish 腿对已存在的 Release
 会就地刷新资产，清单提交走同一个固定地址。
@@ -142,8 +143,7 @@ variables → Actions → Variables）可把 macOS 从某一次发布里摘掉�
 取决于你的微信构建号是否在表内。** 静态地址表只有 1 个构建（见 [PLATFORM.md](PLATFORM.md)），
 且只有 `arm64`：
 
-- **Intel Mac 与不在表内的构建号：引擎可启动，但不会挂钩**（`hook.js` 对表里没有的 arch 保持
-  完全不 patch，状态页会说明原因）。这是刻意选择的行为，不是遗漏。
+- **表外构建号**：Core 进程可启动，但 `engine.start` 会拒绝缺表构建并要求补表。**表内缺少当前架构**时，`hook.js` 保持完全不 patch，状态页说明缺少架构；即使 Frida 附加成功，也不代表调试可用。
 - 表内构建上仍可能撞上 attach 权限墙：对 `WeChatAppEx` 做 Ad-Hoc 重签名是上游推荐做法，关 SIP
   是备选且不推荐。两条**本项目都尚未实机核实**。
 
@@ -151,7 +151,7 @@ variables → Actions → Variables）可把 macOS 从某一次发布里摘掉�
 
 - **macos 腿执行失败会阻止整次发布**（宁可晚发，也不发半个版本）
 - 清单按平台键组织，publish 腿按实际存在的片段合并
-- 想把 macOS 摘出某次发布，把变量设为 `false` 即可 —— **不需要改代码**；缺 `darwin-*` 不报错
+- 想把 macOS 摘出某次发布，设置 `SKIP_MACOS=true`；恢复发布时删除变量或设为 `false` —— **不需要改代码**；缺 `darwin-*` 不报错
 - 另有一个不发布任何东西的旁路：`macos-package` 腿会把 `WxTap.dmg` 作为 CI artifact 上传
   （`macos-dmg`，保留 7 天），用来在不动发布的情况下试包
 - `.dmg` **未公证**：打开需右键 → 打开，去掉该提示需要付费的 Apple Developer ID
@@ -233,6 +233,7 @@ macOS 侧本地发布：`./scripts/build-wails.sh` 出 `.app`、`desktop/build/r
 - [ ] `cd desktop/frontend && npm test && npm run typecheck`
 - [ ] `cd desktop && go vet ./... && golangci-lint run ./... && go test ./...`
 - [ ] 载荷里**没有** `runtime/`（发布包不自带 Node）
+- [ ] 发布构建启用 `-trimpath`；提交与载荷中不含本机配置、数据库、运行日志、真实目标标识或调试证据，文档截图已检查内容与元数据
 - [ ] `latest.json` 里 `platforms` 的每个键都是 `<goos>-<goarch>` 形式
 - [ ] 安装包 / dmg 安装一次再卸载一次，确认清理干净（见下）
 
@@ -250,11 +251,12 @@ Start-Process C:\wttest\uninstall.exe -ArgumentList '/S' -Wait
 ## 七、终端用户需要什么
 
 - **Windows 10/11 x64**：安装 `WxTap-setup.exe`（per-user 安装到 `%LOCALAPPDATA%\Programs\WxTap`，**无需管理员**）
-- **macOS（Apple Silicon）**：**已发布** `WxTap.dmg`（见 §三）。下载后拖进 `Applications` 即可；未公证，首次打开需右键 → 打开。**挂钩能力取决于你的微信构建号是否在地址表内**（表只有 1 个构建、只有 `arm64`），Intel Mac 与表外构建号会「引擎启动但不挂钩」，也可能撞上 SIP / 代码签名的 attach 权限墙 —— 见 [PLATFORM.md](PLATFORM.md)
-- **Node.js 22+**：**唯一的外部运行时要求**。发布包不自带 Node，Core 由用户环境里的 Node 启动；
+- **macOS（Apple Silicon）**：**已发布** `WxTap.dmg`（见 §三）。下载后拖进 `Applications` 即可；未公证，首次打开需右键 → 打开。**挂钩能力取决于微信构建号与架构是否在地址表内**（表只有 1 个构建、只有 `arm64`）；缺表时启动引擎会失败，缺架构时不 patch，也可能遇到 SIP / 代码签名的 attach 权限限制 —— 见 [PLATFORM.md](PLATFORM.md)
+- **Node.js 22+**：Core 的外部运行时。发布包不自带 Node，Core 由用户环境里的 Node 启动；
   自动识别顺序是 `WXTAP_CORE_CMD` → 设置页保存的路径 → PATH → 常见安装位置，
   都找不到时启动报错会给出下载地址。设置页「Node 运行时」可手动指定并自动检测
 - **WebView2 Runtime**：Win11 自带；Win10 通常随 Edge 装上，安装包在缺失时会尝试下载
+- **Electron**：独立小程序或 H5 DevTools 窗口需要；发布包不内置 Electron，可在「设置」页配置路径或自动检测
 - **微信桌面端**：附加目标。地址表覆盖哪些构建、两代结构布局怎么分，见 [PLATFORM.md](PLATFORM.md)（唯一真源，这里不再复述数字）；
   未知构建时 Windows 走自动偏移检测（**仅支持旧布局**：新结构布局的构建缺表时直接报「需补充 …/addresses.<build>.json」
   而不是执行一次无实际作用的扫描；布局分界见 PLATFORM.md），macOS **不做**自动检测（偏移自动检测是 PE 扫描器，没有 Mach-O 对应物），

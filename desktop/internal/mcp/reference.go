@@ -45,26 +45,27 @@ hook_drain / hook_wait 返回的每条记录是 {seq, record}，落定更新是 
 
 	"engine-errors": `# 引擎失败码与前置诊断
 
-engine_start 失败时错误中带可读失败码，按下表归因并如实转述：
+下表是 Core 内部的宿主定位失败类型。engine_start 通常返回中文原始错误，stdio 可能包装为通用错误码 1000；不要要求返回文案包含这些内部码，按实际错误归因并如实转述：
 
 | 码 | 含义 | 处置 |
 | --- | --- | --- |
 | no_host | 未找到微信 WMPF 宿主进程（WeChatAppEx.exe） | 登录微信并打开任意小程序后重试 |
+| no_main_process | 宿主父进程信息缺失 | 检查微信宿主进程与原始错误 |
 | no_ancestor | 未能定位微信主进程 | 确认微信已登录、未被安全软件隔离 |
 | ambiguous_host | 宿主与已登录微信不匹配 / 多个微信实例 | 确认同时仅登录一个微信 |
-| no_version | 读不到该微信版本的 WMPF 版本信息或地址表缺失 | wechat_status 确认版本支持情况 |
+| no_version | 无法读取微信宿主的 WMPF 构建号 | wechat_status 查看构建号及原始错误 |
 
 ## 诊断顺序
 
 1. node_status —— Node 22+ 缺失时 Core 无法启动，引擎与采集类工具均会报错，归因应从该项开始。
-2. wechat_status —— 该工具不产生错误：error 字段非空表示检测本身失败；running:false 表示微信未运行；地址表缺失（addressTable:false）是 no_version 的常见原因。用于区分「微信未运行」与「版本不支持」。
+2. wechat_status —— 该工具不产生错误：error 字段非空表示检测本身失败；running:false 表示微信未运行；addressTable:false 表示静态地址表未覆盖当前构建或架构，是否可自动检测取决于平台与布局。用于区分「微信未运行」与「版本不支持」。
 3. engine_start —— 幂等；失败按上表归因。
-4. engine_status —— frida:true 表示附加成功；miniapp 与 devtools 需等到小程序连接后才为 true。
+4. engine_status —— frida:true 表示附加成功，miniapp:true 表示小程序通道已连接；devtools:true 表示外部 DevTools 客户端已连接，MCP 调试不要求后者。
 
 ## 判读要点
 
-- wechat_status 的 running:true 不表示一切就绪：地址表缺失时 engine_start 仍会失败。
-- miniapp_list 为空有两种成因（未打开小程序 / 引擎未启动），以 engine_status 区分。
+- wechat_status 的 running:true 不表示一切就绪：缺表时仅 Windows 旧布局可自动检测，新布局与 macOS 需补表，缺少架构也不能正常挂钩。
+- miniapp_list 为空可能是引擎未启动、小程序未打开或尚未接入调试通道，以 engine_status 区分附加与连接状态。
 - engine_stop 会丢弃尚未被取走的记录；已入库的记录仍可通过 traffic_records 读取。
 `,
 }

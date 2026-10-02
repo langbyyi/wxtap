@@ -9,11 +9,11 @@ type Step = { title: string; detail: string; link?: Link };
 // 上手顺序是实测结论：引擎 attach 的对象是 WMPF 宿主进程（小程序起来才有），
 // 9421 也是 Core 监听、小程序拨入。这一段不参与下面的筛选——「怎么用起来」要在进页第一屏。
 const quickStart: Step[] = [
-  { title: '准备环境', detail: 'Windows 10/11 x64（需已安装 WebView2 Runtime，Win11 自带）或 macOS（Intel / Apple Silicon）；两者都需要已安装 Node.js 22 或更新版本（WxTap 不内置 Node，Core 是一个 Node 进程）。' },
+  { title: '准备环境', detail: 'Windows 10/11 x64（需 WebView2 Runtime）或 macOS Apple Silicon；macOS 挂钩范围受限，尚待微信实机验收，Intel 没有发布包和对应地址表。两平台都需要 Node.js 22 或更新版本（WxTap 不内置 Node）；独立 DevTools 窗口另需 Electron，可在「设置」页检测和配置。' },
   { title: '先在微信里打开一个小程序', detail: '引擎附加的是 WMPF 宿主进程（Windows 为 WeChatAppEx.exe，macOS 为 WeChatAppEx），它由小程序启动时创建。' },
   { title: '在「状态」页启动引擎', detail: '启动后「组件状态」里的「Frida 注入」变为「已连接」；小程序与 DevTools 两条通道也通时，页面出现「三条通道已就绪」的提示。', link: { to: '/control', label: '状态' } },
-  { title: '确认版本支持', detail: '「状态」页的「版本支持」为「支持」表示该微信构建有静态地址表（引擎尚未读到微信构建号时显示「未检测」）；为「不支持」时启动会自动检测偏移，这期间保持小程序打开，通常约 1 分钟（上限 5 分钟）。', link: { to: '/control', label: '状态' } },
-  { title: '按需进入功能页', detail: '调试：页面路由 / Console 日志 / DevTools / vConsole / 注入脚本；流量：WxAPI / 云函数 / 历史记录；代码：反编译 / 代码浏览；利用：SessionKey / 微信 AK；系统：设置 / MCP 服务；帮助：使用帮助 / 交流反馈。' },
+  { title: '确认版本支持', detail: '「版本支持」为「支持」表示地址表覆盖当前构建与架构，未读到构建号时显示「未检测」。缺表时仅 Windows 旧布局可自动检测（上限 5 分钟）；Windows 新布局与 macOS 需补表，缺少架构也不能正常挂钩。实际连接状态仍以同页结果为准。', link: { to: '/control', label: '状态' } },
+  { title: '按需进入功能页', detail: '调试：页面路由 / Console 日志 / DevTools / vConsole / 注入脚本；流量：WxAPI / 云函数 / 历史记录；代码：反编译 / 代码浏览 / 资产清单；利用：SessionKey / 微信 AK；系统：设置 / MCP 服务；帮助：使用帮助 / 交流反馈。' },
   { title: '出现问题时先查看运行日志', detail: '「状态」页的运行日志是 shell 与 Core 的唯一输出口，同一份内容落盘在数据目录的 logs/wxtap-<日期>.log（Windows 与 WxTap.exe 同目录，macOS 是 ~/Library/Application Support/WxTap）。', link: { to: '/control', label: '状态' } },
 ];
 
@@ -50,7 +50,7 @@ const entries: Entry[] = [
   {
     title: '「版本支持」显示「不支持」如何处理？',
     answer: [
-      '含义是当前微信构建没有随包的静态地址表。Windows 上启动时会自动检测偏移（保持小程序打开，通常约 1 分钟），检测失败会给出失败原因（例如小程序没打开导致的超时）；macOS 不做自动检测（偏移检测是 PE 扫描器，没有 Mach-O 对应物），会直接报「需补充 resources/frida/config/mac/addresses.<build>.json」。',
+      '表示静态地址表未覆盖当前微信构建或架构。Windows 旧结构布局缺表时会自动检测偏移（上限 5 分钟，请保持小程序打开）；新结构布局（WMPF ≥ 25710）缺表时直接要求补表。macOS 不做自动检测，缺表时启动引擎会失败；表中缺少当前架构时不会挂钩。',
       '把微信升级或降级到地址表已覆盖的构建，可以免去这一步检测。',
     ],
     link: { to: '/control', label: '状态' },
@@ -59,8 +59,9 @@ const entries: Entry[] = [
   {
     title: 'DevTools 打开后显示空白',
     answer: [
-      '顺序是：启动引擎 → 打开小程序 → 再打开 DevTools 地址；若先打开 DevTools 再进入小程序，内容需等待调试器连接后才会出现。',
+      '顺序是：先在微信里打开小程序 → 启动引擎 → 确认小程序已连接并选定目标 → 用 Electron 打开独立 DevTools。只有「Frida 已连接」仍不足以开始调试；「DevTools：未连接」表示外部窗口尚未连接，与微信小程序通道是两个独立状态。',
       '引擎没启动时「DevTools」页会直接提示先到「状态」页启动；多个小程序时页面会列出 appid 清单（默认选中第一个），确认选中的是目标再打开。',
+      'H5 要选择实际业务网页目标，微信容器根页面可能没有业务内容。临时验证通过不代表常驻调试窗口已连接；独立 XWeb 尚未接入，真实微信业务 H5 仍待实机验收。',
     ],
     link: { to: '/devtools', label: 'DevTools' },
   },
@@ -96,7 +97,7 @@ const entries: Entry[] = [
     title: '开启捕获报「安装 wxapi 钩子失败」',
     answer: [
       '冒号后面是页面给出的失败原因（例如 no frames with wx found，或「页面未找到可注入的 wx 环境」），含义都是钩子未能在当前页面安装，因为找不到可注入的 wx 环境。',
-      '先在「状态」页确认小程序为「运行中」，待页面加载完成后再点击「开启捕获」；刚切换小程序时尤其容易出现这一时序窗口。',
+      '先在「状态」页确认调试连接已接入小程序，再等页面加载完成后点击「开启捕获」；微信「运行中」和 Frida「已连接」本身都不代表小程序通道已连接，刚切换目标时尤其容易出现这一时序窗口。',
     ],
     link: { to: '/wxapi', label: 'WxAPI' },
   },

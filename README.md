@@ -1,180 +1,167 @@
+<img src="resources/icons/icon.png" alt="WxTap" width="80">
+
 # WxTap
 
-WxTap 是面向**授权安全测试**的微信小程序调试工具：一个 Wails 桌面 GUI，外加一套可供智能体接入的 MCP 工具面。
+**微信小程序安全调试工作台 · 桌面 GUI + MCP**
 
-小程序在微信桌面端内运行于 WMPF 宿主进程（Windows 为 `WeChatAppEx.exe`；macOS 上使用该进程名的是其 worker `WeChatAppEx Helper`，宿主为这些 worker 的父进程），其运行时对象从外部不可见。WxTap 通过 Frida 注入宿主并接入 WMPF 自带的 9421 调试通道，从而可展开小程序运行时的以下层面：
+WxTap 面向自有或已获书面授权的微信小程序，将运行时调试、接口与云函数捕获、源码还原和资产整理集中在一个桌面工作台。你可以通过界面排查问题，也可以通过 MCP 将这些能力接入智能体工作流。
 
-- **发出的请求** —— `wx.*` 与云函数调用的参数、返回值、耗时、错误实时可见，并可按原参数重放；
-- **当前页面路由** —— 当前路由实时回读，可跳转到任意配置页面或按列表自动遍历；页面栈与各层查询参数经 `navigator.pageStack` / MCP `navigator_page_stack` 可读；
-- **源码** —— 从微信小程序包还原工程，标出敏感信息，并支持按目录与全文检索；
-- **凭据与官方接口** —— 从报文或源码提取 `session_key` 用于开放数据解密，用 AppID / AppSecret 验活，或按凭据类型调用官方接口。
+[下载最新版](https://github.com/langbyyi/wxtap/releases/latest) · [快速上手](#快速上手) · [能力总览](#能力总览) · [文档](docs/README.md) · [问题反馈](https://github.com/langbyyi/wxtap/issues)
 
-仓库 `github.com/langbyyi/wxtap`，作者主页 <https://github.com/langbyyi>。生产主线为 **Vue 前端 → Wails Go 桌面壳 → Node/TypeScript Core → Frida**。
+![WxTap 主页：引擎控制、组件状态与运行日志](docs/screenshots/home.png)
 
-> **使用边界**：WxTap 仅应用于自有小程序，或已获书面授权的目标。它刻意在本地**按原文**呈现请求参数、返回值、源码与凭据（掩码会使「签名算错」与「值看错」相互混淆），因此日志与导出结果对外分享前必须自行审阅与脱敏。
+## 适用场景
+
+| 你想解决的问题 | 使用方式 |
+| --- | --- |
+| 页面跳转异常、运行时出错，或反复被 `debugger` 中断 | 查看页面路由和 Console，使用 DevTools 定位代码，按需跳过暂停 |
+| 接口或云函数调用失败，需要核对参数与返回值 | 开启捕获，查看请求、响应、耗时与错误，按原参数重放 |
+| 安全测试前需要了解源码与接口分布 | 还原受支持的小程序包，全文检索源码，扫描敏感信息，整理并导出资产清单 |
+| 需要让智能体协助分析小程序 | 启动 MCP 服务，接入客户端，调用路由、流量、源码等工具 |
+
+## 安装（发布包）
+
+| 平台 | 下载 | 支持情况 |
+| --- | --- | --- |
+| Windows 10/11 x64 | [WxTap-setup.exe](https://github.com/langbyyi/wxtap/releases/latest/download/WxTap-setup.exe) | 当前主要交付平台；微信构建需在支持范围内 |
+| macOS Apple Silicon | [WxTap.dmg](https://github.com/langbyyi/wxtap/releases/latest/download/WxTap.dmg) | 已提供安装包，微信挂钩能力受限，安装前请阅读 [平台说明](docs/PLATFORM.md) |
+
+运行前准备：
+
+- **Node.js 22 或更新版本**：发布包不内置 Node；可在「设置」页检测或指定运行时路径。
+- **微信桌面端**：已登录，并打开自有或已获书面授权的小程序。
+- **WebView2 Runtime**：Windows 需要；缺失时须先安装。
+- **Electron**：使用独立 DevTools 窗口时需要，可在「设置」页配置程序路径。
+
+Windows 安装包默认安装到 `%LOCALAPPDATA%\Programs\WxTap`，无需管理员权限。macOS 打开 DMG 后将 `WxTap.app` 拖入 `Applications`；安装包未公证，首次运行需在 Finder 中右键选择「打开」。
+
+## 快速上手
+
+1. **先打开小程序**：在已登录的微信桌面端中打开目标，使小程序宿主进程启动。
+2. **启动引擎**：进入 WxTap「连接 → 状态」，点击「启动引擎」，确认版本支持与连接状态；失败原因可在同页运行日志查看。
+3. **选择目标**：连接后确认当前小程序；多开时，在「调试 → DevTools」选择并锁定需要调试的目标。
+4. **按需使用**：查看路由和 Console，或进入「WxAPI / 云函数」点击「开启捕获」，再在小程序中触发操作。连接本身不会采集调用，捕获只记录启用后的数据。
+5. **深入分析**：打开独立 DevTools 定位脚本；需要源码与资产时，进入「代码」工作区。
+
+仅启动引擎不等于小程序已连接；以状态页的实际连接结果为准。DevTools 窗口是否打开与小程序通道是否连接也是两个独立状态。
 
 ## 能力总览
 
 界面按 7 个分组组织，共 18 个页面。
 
-| 分组 | 页面 | 作用 |
+| 分组 | 页面 | 主要能力 |
 | --- | --- | --- |
-| **连接** | 状态 | 配置端口、启停引擎；查看微信宿主、Frida、小程序与 DevTools 的对接状态 |
-| **调试** | 页面路由 · Console 日志 · DevTools · vConsole · 注入脚本 | 当前路由回读与跳转、console 与未捕获错误、独立 DevTools 暂停调试、vConsole 面板、自定义脚本注入 |
-| **流量** | WxAPI · 云函数 · 历史记录 | 实时捕获与重放 `wx.*` 及云函数调用；已落库记录分页回看；HTTP 记录可生成 cURL、经配置的上游代理重放和导出 HAR（审计操作当前限最近 500 条记录窗口） |
-| **代码** | 反编译 · 代码浏览 · 资产清单 | 从 wxapkg 还原源码并标出敏感信息；按目录与全文检索浏览；按小程序汇总代码与流量中的接口、静态资源、WebSocket 和云函数，支持分页筛选及 JSON/TXT/CSV/nuclei/httpx 导出。页面模板由微信新版编译模板运行时（`__wxCodeSpace__`）生成的小程序无法还原——此类 app 在枚举阶段即被识别并排除出可反编译列表；否则整次还原会中止且不产出任何文件（该失败路径是原子的，不存在「部分成功」） |
-| **利用** | SessionKey · 微信 AK | 提取 `session_key` 做 AES 加解密；填 AppID / AppSecret 向官方接口验活 |
-| **系统** | 设置 · MCP 服务 | 运行目录与外部程序路径、版本检查；启动 MCP 服务供外部智能体接入 |
-| **帮助** | 使用帮助 · 交流反馈 | 上手流程与报错处理；反馈渠道与更新说明 |
+| **连接** | 状态 | 启停引擎，查看微信宿主、版本支持、Frida 与调试通道状态，定位连接故障 |
+| **调试** | 页面路由 · Console 日志 · DevTools · vConsole · 注入脚本 | 路由回读、跳转与遍历，日志与异常查看，断点调试、暂停控制、目标诊断、H5 会话与脚本注入 |
+| **流量** | WxAPI · 云函数 · 历史记录 | 捕获调用参数、返回值与耗时，按原参数重放，历史分页查询；HTTP 记录支持 cURL、上游代理重放与 HAR 导出 |
+| **代码** | 反编译 · 代码浏览 · 资产清单 | 还原受支持的 wxapkg，源码浏览与全文搜索、敏感信息扫描；汇总代码和流量中的接口、资源、WebSocket 与云函数 |
+| **利用** | SessionKey · 微信 AK | 提取 `session_key` 并进行 AES 加解密，使用 AppID / AppSecret 验证官方接口凭据 |
+| **系统** | 设置 · MCP 服务 | 配置运行时与外部程序路径，检查更新，启动 MCP 服务 |
+| **帮助** | 使用帮助 · 交流反馈 | 上手指导、常见问题与反馈入口 |
 
-以下几条贯穿全局的设计由契约测试锁定：
+资产清单支持按小程序、主机、类型与关键词筛选，导出 JSON、TXT、CSV 以及适用于 nuclei / httpx 的目标列表。调用记录保存在本地 SQLite 中，历史分页读取，请求与响应正文按需加载。
 
-- **采集不是连接的副作用** —— 连接小程序后未启用「开启捕获」时不会记录任何调用；启用后仅记录启用之后的调用。否则首次启用会把连接以来的积压误当作新流量输出。
-- **一条记录只渲染一行** —— 记录身份 `rid` 与流量库主键同源，事件流与轮询两条投递路径对同一 `rid` 幂等，drain 之后的补投递也不会产生第二行。
-- **正文按需读取** —— 列表始终不携带请求/响应正文，历史记录按页码逐页查看，不一次性加载全部记录。
-- **丢弃计数如实上报** —— 页内缓冲或投递队列溢出时报 `dropped`，避免「数据不全」与「本来就没有」在呈现上无法区分。
-- **长任务可见** —— 反编译、扫描、导出等异步任务必须显示阶段、进度与失败原因。
+### 工作区预览
 
-## 架构
+以下为 v1.0.4 的界面布局，截图时未连接小程序、未采集数据。
 
-```text
-Vue (desktop/frontend) → Wails Go (desktop/) → Node Core (core/) → Frida / CDP
+<details>
+<summary>页面路由：路由选择、自动遍历与防跳转</summary>
+
+![WxTap 页面路由工作区](docs/screenshots/navigator.png)
+
+</details>
+
+<details>
+<summary>WxAPI：调用分类、搜索与请求详情工作区</summary>
+
+![WxTap WxAPI 工作区](docs/screenshots/wxapi.png)
+
+</details>
+
+<details>
+<summary>反编译：包目录选择与敏感信息结果工作区</summary>
+
+![WxTap 反编译工作区](docs/screenshots/extract.png)
+
+</details>
+
+### 暂停控制与 H5 调试
+
+- **暂停控制**：作用于当前锁定的小程序。跳过模式会恢复已暂停的代码，并跳过后续 `debugger`、正常断点和异常暂停；可切回正常暂停。只有调试通道确认后才显示设置成功，使用此功能不要求先打开外部 DevTools 窗口。
+- **目标诊断**：按类型、标题、URL 或 ID 筛选当前通道暴露的目标，查看完整信息并复制 JSON。小程序资源、worker、微信容器与 H5 候选分别标识。
+- **H5 调试**：面向微信内嵌的业务网页。先验证实际页面与连接能力，再按需打开独立 DevTools 查看该网页的脚本、Console 和 Network；验证通过仅代表临时会话可用。
+
+### 当前支持边界
+
+- **微信版本与平台**：运行能力取决于宿主版本与地址表。macOS 的安装、启动与原生依赖经过 CI 验证，但微信实机附加尚未完成验收；Intel Mac 没有发布包和对应地址表，Linux 桌面微信不在产品范围。详见 [平台说明](docs/PLATFORM.md)。
+- **H5**：目前使用 WMPF 暴露的目标，独立 XWeb 调试通道尚未接入；真实微信业务 H5 的端到端验收仍待完成。H5 的 Network 显示在独立 DevTools 中，尚未汇入 WxTap 流量库。
+- **反编译**：微信新版 `__wxCodeSpace__` 编译模板不支持还原；对应小程序会被排除，无法完整还原时不输出半成品。
+- **流量审计与资产来源**：cURL、HTTP 重放和 HAR 导出当前限全库最近 500 条审计记录；资产扫描汇总源码及该小程序最近最多 500 条流量，不代表完整历史资产。
+
+更完整的行为与限制见 [功能矩阵](docs/FEATURE_MATRIX.md)，微信实机验证项见 [验收清单](docs/WECHAT_E2E_CHECKLIST.md)。
+
+## 智能体接入（MCP）
+
+在「系统 → MCP 服务」启动服务，将以下配置加入支持 HTTP MCP 的客户端：
+
+```json
+{
+  "mcpServers": {
+    "wxtap": {
+      "url": "http://127.0.0.1:9527/mcp"
+    }
+  }
+}
 ```
 
-- **Core 是独立进程**，Go 负责拉起、监督与日志转发；Core 加载 `resources/frida/hook.js` 与地址表，维护 9421（WMPF 调试通道）与 31415（CDP 代理）。
-- **两个回环 HTTP 面**：27182（可选云函数转发）与 9527（GUI 内嵌 MCP 服务，同一端口同时提供 Streamable HTTP 的 `POST /mcp` 与旧式 SSE 的 `GET /sse`），仅绑定 `127.0.0.1`，且刻意不发送 `Access-Control-Allow-Origin`。
-- **MCP 同一份实现跑三种传输**：Streamable HTTP、HTTP+SSE（legacy）、stdio（`WxTap.exe -mcp`）。
-
-进程模型、端口、数据位置与来源校验的细节见 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)。
-
-## 平台支持
-
-| 平台 | 状态 |
-| --- | --- |
-| **Windows x64** | 当前交付主线（Wails `windows/amd64`，Core `createWindowsFridaRuntime`），地址表覆盖 54 个微信构建 |
-| **macOS（Apple Silicon）** | 已发布 `WxTap.dmg`（`darwin-arm64`，未公证，首次打开需右键 → 打开）。构建、bundle、`.dmg` 挂载与启动由 CI 在真 Mac 上逐次验证；但**可用边界很窄**，用之前请读 [docs/PLATFORM.md](docs/PLATFORM.md)：静态地址表**只覆盖 1 个微信构建**，且只有 `arm64` —— 不在表内的构建号与本机是 Intel 时，引擎能启动但**不会挂钩**；Frida attach 还可能要先处理 SIP / 代码签名 |
-| **macOS（Intel）** | 代码与打包脚本支持（`build-wails.sh` 按当前架构构建），但**没有发布产物**，也**没有 x64 地址表** |
-| Linux 桌面微信 | **不在产品范围**（云端 Linux 仅作开发 / 单测 / 交叉编译） |
-
-macOS 侧的**实机 E2E（对已登录微信的 attach、地址表准确性）尚未做过**，这也是 `docs/WECHAT_E2E_CHECKLIST.md` 里 mac 前置项仍待办的原因；已发布的是「能装、能启动、能与官方接口交互」的部分，挂钩能力取决于你的微信构建号是否在表内。详见 [docs/PLATFORM.md](docs/PLATFORM.md) 与 [docs/RELEASE.md](docs/RELEASE.md) §三。
-
-## 安装（发布包）
-
-Windows 10/11 x64 用户只需下载**一个文件** `WxTap-setup.exe`。它以 per-user scope 安装到 `%LOCALAPPDATA%\Programs\WxTap`（普通用户即可写入，无需管理员权限）。
-
-macOS（Apple Silicon）用户下载 `WxTap.dmg`，打开后把 `WxTap.app` 拖进 `Applications`。`.dmg` 未公证，首次打开需在 Finder 里右键 → 打开（或 `xattr -dr com.apple.quarantine /Applications/WxTap.app`）；去掉这一步需要付费的 Apple Developer ID。
-
-单独一个 `WxTap.exe` 无法运行 —— 它需要从同级目录读取 `core/`、`resources/`、`migrations/`，因此「一个文件」由安装包实现，而非单文件 exe。安装后的原位更新也在同一目录替换文件。macOS 上同样的内容位于 bundle 的 `Contents/Resources/`，所以「一个文件」由 `.dmg` 实现。
-
-运行还需要：
-
-- **Node.js 22+** —— 发布包**不自带** Node 运行时，Core 由用户环境里的 Node 启动。解析顺序是 `WXTAP_CORE_CMD` → 设置页保存的路径 → PATH → 常见安装位置，每个候选都先跑 `node -p process.versions.node` 校验。前两级是**显式指定**，不合格即当场报错，不会静默改用其他 Node；PATH 与自动检测这两级会跳过不合格的候选继续查找，跳过原因记录在设置页的解析结果中；全部不可用时给出可执行的错误信息。
-- **WebView2 Runtime** —— 仅 Windows：Win11 自带，Win10 通常随 Edge 装上，精简版可能缺失。
-- **微信桌面端** —— 已登录，作为附加目标。
+`9527` 是默认端口，修改后需同步客户端配置。服务默认提供精简工具目录，支持运行时调试、路由操作、流量查询与源码分析；也提供 SSE 和 stdio 接入方式。客户端配置、工具清单与完整目录选项见 [MCP 接入指南](docs/MCP.md)。
 
 ## 从源码构建
+
+需要 Go 1.25+、Node.js 22+ 和对应平台的 Wails 构建依赖。在仓库根目录执行：
+
+Windows：
 
 ```powershell
 .\scripts\build-wails.ps1
 ```
 
-脚本会构建 `core/` 与 `desktop/frontend/`、调用 Wails，并将可运行目录整理到 `desktop/build/release/`（含 `WxTap.exe`、旁路 `core/`、`resources/`、`migrations/`），同时产出安装包 `desktop/build/release-dist/WxTap-setup.exe`。
+产物为 `desktop/build/release/` 下的可运行目录，以及 `desktop/build/release-dist/WxTap-setup.exe` 安装包。运行目录包含配套资源，分发时请使用安装包。
 
-macOS（需在对应架构的 macOS 上执行，脚本按当前架构构建）：
+macOS（在目标架构的 macOS 上执行，需 Xcode 命令行工具）：
 
 ```bash
 ./scripts/build-wails.sh
 ```
 
-产出 `desktop/build/release/WxTap.app`，`core/`、`resources/`、`migrations/` 全部位于 bundle 的 `Contents/Resources/`。
+产物为 `desktop/build/release/WxTap.app` 与 DMG 安装包。详细环境要求、开发模式与测试命令见 [开发文档](docs/DEVELOPMENT.md)，版本发布流程见 [发布文档](docs/RELEASE.md)。
 
-手动步骤等价于：
-
-```powershell
-cd core;                npm ci; npm run build
-cd ..\desktop\frontend; npm ci; npm run build
-cd ..;                  go run github.com/wailsapp/wails/v2/cmd/wails@v2.16.0 build -clean -platform windows/amd64
-```
-
-**环境要求**：Go 1.25+、Node.js 22+、Wails v2 CLI（发布构建时）。发布目录携带 `core/`（含 `node_modules`）、`resources/` 与 `migrations/`，但**不含 Node 运行时**。
-
-## 开发与测试
-
-```bash
-cd core && npm run lint && npm test        # ESLint + vitest + dist 检查（frida 必须 external）
-cd core && npm run coverage                # 覆盖率门禁
-cd ../desktop/frontend && npm ci && npm test && npm run build
-cd ../desktop && go vet ./... && go test ./...   # 契约 / 路由 / 流量 / MCP / 引擎客户端
-cd ../desktop && golangci-lint run ./...   # 0 issues 为准
-```
-
-> `desktop/main.go` 用 `//go:embed all:frontend/dist` 嵌入前端产物。全新克隆后直接 `go build` / `go test` 会因该目录缺失而报 `pattern all:frontend/dist: no matching files found`：请先执行前端构建，或临时放一个占位 `frontend/dist/index.html`（CI 即用此方式）。
-
-实机验证（Frida / 9421 / 31415 / 多开 / Hook 实捕）**不能**以离线测试替代，必须按 [docs/WECHAT_E2E_CHECKLIST.md](docs/WECHAT_E2E_CHECKLIST.md) 在授权微信桌面端上完成端到端确认。更多命令与改动指南见 [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md)。
-
-## 发布新版本
-
-一条命令，其余全自动（跑本地门禁 → 改版本号 → 提交 → 打 tag → 推送；CI 接管构建、发布 Release、把含更新说明的 `latest.json` 提交回 main，已装用户的应用会在启动时自动收到更新）：
-
-```powershell
-pwsh -File scripts/new-release.ps1 -Version 1.2.0 -Notes "用户可读的更新说明，会显示在应用内设置页"
-```
-
-细节、重发一版、手动流程与验收清单见 [docs/RELEASE.md](docs/RELEASE.md)。
-
-## 数据与日志
-
-可写数据默认与运行中的 `WxTap.exe` 位于同一目录（macOS 不同：为 `~/Library/Application Support/WxTap`）：配置、日志、反编译输出与流量数据库均位于该目录，Windows WebView2 状态放在 `webview/`。运行日志写入 `<数据目录>/logs/wxtap-YYYYMMDD.log`，单文件超 1 MB 时轮转。
-
-常用覆盖变量：`WXTAP_DATA_DIR`、`WXTAP_TRAFFIC_DB`、`WXTAP_MIGRATIONS_DIR`、`WXTAP_PACKAGES_DIR`、`WXTAP_USERS_DIR`。另一组由**桌面壳**读取、用于决定如何拉起 Core：`WXTAP_CORE_CMD`、`WXTAP_CORE_SCRIPT`、`WXTAP_CORE_DIR`；其中只有 `WXTAP_RESOURCE_ROOT` 由 Core 进程自身读取。
-
-**不要将用户配置或抓取结果提交到 Git** —— 日志与流量库含目标小程序的运行数据。
-
-## 智能体接入（MCP）
-
-WxTap 将调试能力以 MCP 服务器形式暴露给任意 agent：附加宿主、采集流量、驱动小程序 UI、在 JS 运行时下断暂停、离线反编译审计。`tools/list` 默认广播合并形态的精简目录（被合并吸收的旧工具名仍可调用，仅不再广播）；需要完整清单时，stdio 加 `-tools=all`，HTTP 模式使用 `mcp.start {tools:"all"}`。
-
-```json
-{ "mcpServers": { "wxtap": { "url": "http://127.0.0.1:9527/mcp" } } }
-```
-
-在 GUI 的「MCP 服务」页启动服务后即可使用。传输方式、工具分档、resources / prompts 与接入引导顺序见 [docs/MCP.md](docs/MCP.md)。
-
-## 仓库地图
+## 架构
 
 ```text
-wxtap/   # 本地目录名可自定；产品名 WxTap
-  README.md
-  .gitignore
-  scripts/build-wails.ps1   # Windows 一键构建（出安装包）
-  scripts/build-wails.sh    # macOS 一键构建（WxTap.app bundle）
-  desktop/                  # Wails v2 Go 应用（前端仅在 desktop/frontend；migrations/ 为 SQLite 迁移，随发布分发）
-  core/                     # Node/TS WMPF 引擎
-  contracts/                # 对外发布的契约：traffic.ts（流量模型，对应 desktop/internal/traffic/model.go）与 audit.ts（资产清单/单条流量载荷，对应 desktop/internal/api/ipc/audit.go）；Core 侧 RPC 类型在 core/src/rpc/protocol.ts
-  resources/                # 运行时资源（frida、skills、devtools_electron.js、icons）
-  configs/                  # 示例配置
-  docs/                     # 文档索引与专题
+Vue 桌面界面 → Wails / Go 桌面壳 → Node.js / TypeScript Core → Frida / WMPF / CDP
+                  └─ MCP 服务 → 智能体客户端
 ```
 
-完整树与目录约定见 [docs/REPO_LAYOUT.md](docs/REPO_LAYOUT.md)。
+`desktop/` 包含桌面壳、前端与 MCP 服务；`core/` 负责微信连接和调试协议；`resources/` 提供运行时资源；`contracts/` 定义跨模块契约。进程、端口与数据位置见 [架构文档](docs/ARCHITECTURE.md)，目录约定见 [仓库地图](docs/REPO_LAYOUT.md)。
 
-## 文档
+## 数据与授权
 
-- [docs/README.md](docs/README.md) — 文档索引
-- [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) — 进程模型、端口、数据与资源位置
-- [docs/MODULE_MAP.md](docs/MODULE_MAP.md) — 模块职责与 GUI / MCP 索引
-- [docs/FEATURE_MATRIX.md](docs/FEATURE_MATRIX.md) — 功能矩阵（各工作区的前端入口、后端能力与数据策略）
-- [docs/GITHUB_RESEARCH.md](docs/GITHUB_RESEARCH.md) — GitHub 相关项目调研、源码确认的集成缺口与后续开发优先级
-- [docs/MCP.md](docs/MCP.md) — MCP 接入指南（传输、客户端配置、能力面）
-- [docs/PLATFORM.md](docs/PLATFORM.md) — 平台定位与地址表覆盖
-- [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md) — 本地开发、构建与自动化测试
-- [docs/RELEASE.md](docs/RELEASE.md) — 发版操作说明（tag 触发 CI、清单契约、验收清单）
-- [docs/WECHAT_E2E_CHECKLIST.md](docs/WECHAT_E2E_CHECKLIST.md) — 授权微信实机验收门禁
-- [docs/FEEDBACK.md](docs/FEEDBACK.md) — 交流反馈（应用内同名页面的源文档）
+WxTap 仅用于自有小程序或已获得书面授权的目标。请求、响应、源码与凭据按原文展示；分享截图、日志或导出文件前，请检查并移除个人信息、凭据和业务数据，不要将用户配置或捕获结果提交到 Git。
 
-## 授权与反馈
+配置、日志、流量数据库与反编译输出保存在本地数据目录。Windows 默认位于运行中的 `WxTap.exe` 同级目录；macOS 默认位于 `~/Library/Application Support/WxTap`。实际目录可在「设置」页查看，覆盖配置见 [架构文档](docs/ARCHITECTURE.md)。
 
-代码以 [MIT License](LICENSE) 发布；`resources/frida/config/` 下的地址表数据来自第三方项目，例外条款见 [NOTICE](NOTICE)。
+代码采用 [MIT License](LICENSE)；第三方地址表的来源与许可例外见 [NOTICE](NOTICE)。
 
-- 问题反馈：提交 [Issue](https://github.com/langbyyi/wxtap/issues)，应用内「交流反馈」页的按钮直达同一地址。
-- 各版本更新内容见 [Releases](https://github.com/langbyyi/wxtap/releases)；应用内「设置」页的版本检查读取 `latest.json` 的 `notes` 字段。
+## 文档与反馈
+
+| 入口 | 内容 |
+| --- | --- |
+| [文档索引](docs/README.md) | 全部专题文档 |
+| [功能矩阵](docs/FEATURE_MATRIX.md) | 功能入口、数据策略与已知限制 |
+| [平台支持](docs/PLATFORM.md) | 微信版本覆盖与 macOS 支持边界 |
+| [MCP 接入](docs/MCP.md) | 客户端配置、传输方式与工具目录 |
+| [开发与发布](docs/DEVELOPMENT.md) · [发布流程](docs/RELEASE.md) | 本地构建、测试与版本发布 |
+| [GitHub Issues](https://github.com/langbyyi/wxtap/issues) | 问题反馈与功能建议 |
+| [Releases](https://github.com/langbyyi/wxtap/releases) | 发布包与版本更新说明 |

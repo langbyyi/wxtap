@@ -8,7 +8,7 @@
 | --- | --- | --- |
 | Windows x64 | 正式目标；第一阶段交付 | Core `createWindowsFridaRuntime`；`resources/frida/config/win` 地址表 54 个 build（最新 25715，文件名与表内版本一致、**两代结构布局**由测试锁定），缺表时走 `frida/autodetect/win.js` 自动检测偏移（仅支持旧布局：≥25710 属新结构布局，缺表时直接要求补表）；Wails `windows/amd64` 构建已通过，`scripts/build-wails.ps1` 在 CI 做语法门禁 |
 | macOS Apple Silicon | **已发布**（`darwin-arm64` 的 `WxTap.dmg`）；挂钩能力受限 | Core 已接入 mac 运行时（`WmpfFridaRuntime` 双平台策略）：宿主**优先**按主进程所在的 bundle 路径匹配 `WeChatAppEx`，找不到才**回落**到 `WeChatAppEx Helper` 的父进程（后者是上游 `evi0s/WMPFDebugger` 的 darwin 做法）；构建号从宿主 bundle 的 `Info.plist:CFBundleVersion` 取（纯整数直接用，点分如 `4.269136.0` 取其中最大的一段）；`config/mac` **只有 1 个 build（269136，仅 arm64）**，结构（`LoadStartHookOffset` / `CDPFilterHookOffset` / 6 段 `SceneOffsets`）由 `core/src/engine/frida-tables.test.ts` 锁定，hook 路径与 Windows 共用 —— `hook.js` 用 Frida 的 `args[]` 屏蔽 ABI 差异；`scripts/build-wails.sh` 按当前架构产出 `WxTap.app` bundle 与 `.dmg`，staging 由 `TestMacOSBuildScriptStagesBundleLayout` 锁定，脚本本身由 CI 的 `macos-package` 腿在真 Mac 上执行；darwin arm64/amd64 交叉编译另有门禁。**仍未**做的是需要微信桌面端的部分：Frida attach 能否越过 SIP / 代码签名、以及地址表对给定构建号的覆盖 |
-| macOS Intel（x64） | **不发布** | 没有 `x64` 地址表：`config/mac/addresses.269136.json` 只分 `arm64` 一段，而 `hook.js` 对表里没有的 arch 保持**完全不 patch**，所以 Intel Mac 上是「引擎可启动但不挂钩」。`build-wails.sh` 能在 Intel Mac 上构建出 `darwin-amd64` 包，但不在交付范围内 |
+| macOS Intel（x64） | **不发布** | 没有 `x64` 地址表：`config/mac/addresses.269136.json` 只分 `arm64` 一段，`hook.js` 对表里没有的 arch 保持**完全不 patch**；缺少整个构建表时，`engine.start` 会直接失败。`build-wails.sh` 能在 Intel Mac 上构建出 `darwin-amd64` 包，但不在交付范围内 |
 | Linux 桌面微信 | **不在产品范围** | 云端 Linux 仅用于开发、单测、交叉编译；Linux 微信客户端 ≠ Windows/mac WMPF 路径 |
 
 ## 说明
