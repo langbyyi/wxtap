@@ -12,6 +12,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -20,6 +21,10 @@ import (
 type imageResult struct {
 	Data     string
 	MimeType string
+	// Note is an optional second content block (text) riding with the image —
+	// the route/viewport metadata a screenshot needs to self-check which page
+	// it actually captured.
+	Note string
 }
 
 func (s *Server) callMiniappTool(ctx context.Context, name string, raw json.RawMessage) (any, error) {
@@ -48,8 +53,19 @@ func (s *Server) callMiniappTool(ctx context.Context, name string, raw json.RawM
 		if format == "jpeg" {
 			mime = "image/jpeg"
 		}
-		return imageResult{Data: data, MimeType: mime}, nil
+		return imageResult{Data: data, MimeType: mime, Note: s.screenshotNote(ctx)}, nil
 	case "miniapp_click":
+		if nodePath := stringArg(args, "node_path", ""); nodePath != "" {
+			// a11y 树的路径寻址点击：按兄弟序号路径重定位（0/2/1 = body 下第 0
+			// 个孩子的第 2 个孩子的第 1 个）。组件桥可达时发 exparser tap——坐标
+			// 点击落在 web-view 下面、虚拟节点吃不到 DOM click 的场景实测都存在。
+			contextID, err := s.pageContextID(ctx)
+			if err != nil {
+				return nil, err
+			}
+			expression := `(function(){var el=document.body;var parts=` + jsLiteral(nodePath) + `.split('/');for(var i=0;i<parts.length;i++){if(parts[i]===''){continue}var idx=parseInt(parts[i],10);if(isNaN(idx)||!el.children||idx>=el.children.length)return JSON.stringify({error:'Node not found: '+` + jsLiteral(nodePath) + `});el=el.children[idx]}var tag=(el.tagName||'').toLowerCase();var r=el.getBoundingClientRect();var via='dom';try{var wxel=el.__wxElement;if(wxel&&window.exparser&&typeof window.exparser.triggerEvent==='function'){window.exparser.triggerEvent(wxel,'tap',{});via='exparser'}}catch(e){via='dom'}if(via==='dom')el.click();return JSON.stringify({ok:true,x:Math.round(r.left+r.width/2),y:Math.round(r.top+r.height/2),tag:tag,via:via})})()`
+			return inlineErrorResult(s.evaluateJSON(ctx, expression, false, contextID, 10000))
+		}
 		if selector := stringArg(args, "selector", ""); selector != "" {
 			// 小程序的 DOM 只存在于当前页 webview。宿主页里根本没有小程序元素，
 			// 在默认上下文里 querySelector 只会回「Element not found」。
@@ -57,7 +73,7 @@ func (s *Server) callMiniappTool(ctx context.Context, name string, raw json.RawM
 			if err != nil {
 				return nil, err
 			}
-			expression := `(function(){var el=document.querySelector(` + jsLiteral(selector) + `);if(!el)return JSON.stringify({error:'Element not found'});var r=el.getBoundingClientRect();el.click();return JSON.stringify({ok:true,x:r.left+r.width/2,y:r.top+r.height/2,tag:el.tagName})})()`
+			expression := `(function(){var el=document.querySelector(` + jsLiteral(selector) + `);if(!el)return JSON.stringify({error:'Element not found'});var r=el.getBoundingClientRect();var via='dom';try{var wxel=el.__wxElement;if(wxel&&window.exparser&&typeof window.exparser.triggerEvent==='function'){window.exparser.triggerEvent(wxel,'tap',{});via='exparser'}}catch(e){via='dom'}if(via==='dom')el.click();return JSON.stringify({ok:true,x:Math.round(r.left+r.width/2),y:Math.round(r.top+r.height/2),tag:(el.tagName||'').toLowerCase(),via:via})})()`
 			// 没点到必须读作失败：选择器命中不了元素时页内回 {error}，而按
 			// isError 判断的 agent 会把带 error 字段的成功当成点过了。
 			return inlineErrorResult(s.evaluateJSON(ctx, expression, false, contextID, 10000))
@@ -117,6 +133,28 @@ func (s *Server) callMiniappTool(ctx context.Context, name string, raw json.RawM
 			contextID = resolved
 		}
 		if selector != "" {
+			// 组件路径优先：wx-input 一类组件的值不吃键盘事件（实测逐字符
+			// keyDown 改不了组件值），走组件的 input 事件才进得去。exparser 桥
+			// 不可达（component:false）时退回键盘路径；组件回了空值按失败处理。
+			componentExpression := `(function(){var el=document.querySelector(` + jsLiteral(selector) + `);if(!el)return JSON.stringify({error:'Element not found: '+` + jsLiteral(selector) + `});var wxel=el.__wxElement;if(!(wxel&&window.exparser&&typeof window.exparser.triggerEvent==='function'))return JSON.stringify({component:false});window.exparser.triggerEvent(wxel,'input',{value:` + jsLiteral(text) + `});var v=el.value==null?'':String(el.value);return JSON.stringify({component:true,valueLen:v.length})})()`
+			value, err := s.evaluateJSON(ctx, componentExpression, false, contextID, 5000)
+			if err != nil {
+				return nil, err
+			}
+			entry := objectMap(value)
+			if message := stringArg(entry, "error", ""); message != "" {
+				return nil, errors.New(message)
+			}
+			if entry["component"] == true {
+				length := 0
+				if v, ok := entry["valueLen"].(float64); ok {
+					length = int(v)
+				}
+				if length == 0 {
+					return map[string]any{"ok": false, "error": "the input event delivered an empty value", "value_len": 0}, nil
+				}
+				return map[string]any{"ok": true, "value_len": length, "via": "component-input"}, nil
+			}
 			// 命中不了元素必须读作失败：静默跳过聚焦会让后面的按键落到别处，
 			// 而工具仍然回 ok:true。
 			expression := `(function(){var el=document.querySelector(` + jsLiteral(selector) +
@@ -141,12 +179,45 @@ func (s *Server) callMiniappTool(ctx context.Context, name string, raw json.RawM
 	case "miniapp_navigate":
 		method := stringArg(args, "method", "navigateTo")
 		route := stringArg(args, "route", "")
+		delta := intArg(args, "delta", 1)
+		if delta < 1 {
+			delta = 1
+		}
+		if method != "navigateBack" && route == "" {
+			return nil, fmt.Errorf("missing required argument \"route\" for %s", method)
+		}
+		// 回调写 ok 不等于栈真的变了：实测 navigateTo 回 ok 时对应层路由还是
+		// 空串、switchTab/navigateBack 回 ok 而栈纹丝不动。以调用之后的真实
+		// 路由为准——先记下分发前的栈深，回退按深度收敛判定。
+		beforeDepth, beforeTop := s.stackShape(ctx)
 		// 一律经页面侧导航钩子，由它解析 wxFrame 并区分 tabBar 页。以前 switchTab
 		// 单独向 CDP 求值 `wx.switchTab`：既落在没有 wx 的宿主页上下文（必然回
 		// "wx is not defined"），又绕开了钩子，于是守卫开启时连工具自己的跳转都会
 		// 被自己的守卫拦下、并且假报成功。
-		_, err := s.appCall(ctx, "navigator.navigate", map[string]any{"route": route, "method": method})
-		return map[string]any{"ok": err == nil, "route": route, "method": method}, err
+		_, err := s.appCall(ctx, "navigator.navigate", map[string]any{"route": route, "method": method, "delta": delta})
+		result := map[string]any{"route": route, "method": method}
+		if err != nil {
+			// 插件页在前台时，宿主侧的返回/切换会被拒（"no permission currently"）
+			// ——改在该页 webview 上下文里调 navigateBack，实测这样才回得动。
+			if method == "navigateBack" {
+				if rbErr := s.navigateBackInPageWebview(ctx, delta); rbErr == nil {
+					result["ok"] = true
+					result["note"] = "dispatched inside the page webview (the appservice dispatch was refused)"
+					return result, nil
+				}
+			}
+			return nil, err
+		}
+		observed, verifyErr := s.verifyNavigation(ctx, method, strings.TrimPrefix(route, "/"), delta, beforeDepth, beforeTop)
+		if verifyErr != nil {
+			result["ok"] = false
+			result["error"] = verifyErr.Error()
+			result["route_observed"] = observed
+			return result, nil
+		}
+		result["ok"] = true
+		result["route_observed"] = observed
+		return result, nil
 	case "miniapp_get_routes":
 		result, err := s.appCall(ctx, "navigator.pages", map[string]any{})
 		if err != nil {
@@ -204,7 +275,35 @@ func (s *Server) callMiniappTool(ctx context.Context, name string, raw json.RawM
 			"deltaY": y,
 		}, nil
 	case "miniapp_list_contexts":
+		if s.deps.Core == nil {
+			return nil, fmt.Errorf("core engine unavailable")
+		}
 		_, _ = s.cdp(ctx, "Runtime.enable", map[string]any{}, 5000)
+		// 事件路径：Core 桥吃 Runtime.executionContext* 事件维护的注册表——
+		// 权威、零探测。列表项补 id/种类/路由（webview 用 body[is]）。
+		if items, err := s.deps.Core.Contexts(ctx); err == nil && len(items) > 0 {
+			entries := make([]map[string]any, 0, len(items))
+			for _, item := range items {
+				id, ok := contextIDValue(item["id"])
+				if !ok {
+					continue
+				}
+				entry := map[string]any{"id": id}
+				if s.contextAnswers(ctx, id, appServiceProbe) {
+					entry["kind"] = "appservice"
+				} else {
+					entry["kind"] = "webview"
+					entry["route"] = s.contextRoute(ctx, id)
+				}
+				entries = append(entries, entry)
+			}
+			if len(entries) > 0 {
+				sort.Slice(entries, func(i, j int) bool { return entries[i]["id"].(int) < entries[j]["id"].(int) })
+				return map[string]any{"contexts": entries, "count": len(entries), "source": "events"}, nil
+			}
+		}
+		// 回退路径：WMPF 的 CDP shim 不保证发 context 事件——有界探测（1..24，
+		// 每探针 3s），行为与事件路径落地前一致。
 		contexts := []map[string]any{}
 		for id := 1; id <= contextProbeMaxID; id++ {
 			value, err := s.evaluate(ctx, `(function(){return JSON.stringify({hasWx:typeof wx!=='undefined',hasGetApp:typeof getApp!=='undefined',loc:typeof location!=='undefined'?location.href:'N/A'})})()`, false, &id, 3000)
@@ -225,7 +324,7 @@ func (s *Server) callMiniappTool(ctx context.Context, name string, raw json.RawM
 			}
 			contexts = append(contexts, map[string]any{"id": id, "name": kind, "origin": info["loc"], "type": kind})
 		}
-		return map[string]any{"contexts": contexts, "count": len(contexts)}, nil
+		return map[string]any{"contexts": contexts, "count": len(contexts), "source": "probe"}, nil
 	case "miniapp_evaluate":
 		var contextID *int
 		if value, ok := numberArg(args, "context_id"); ok {
@@ -243,6 +342,29 @@ func (s *Server) callMiniappTool(ctx context.Context, name string, raw json.RawM
 			return capped, nil
 		}
 		return map[string]any{"value": value, "type": valueType}, nil
+	case "miniapp_call":
+		// 业务调用走 appservice：小程序自己的方法 / store.dispatch 才会过它自己的
+		// 请求拦截器（裸调 wx.request 不带令牌，实测如此）。回包只回结果的形状
+		// ——类型、长度、键名——令牌不出小程序。
+		contextID, err := s.appServiceContextID(ctx)
+		if err != nil {
+			return nil, err
+		}
+		value, _, exception, err := s.evaluateDetail(ctx, stringArg(args, "expression", ""), boolArg(args, "await_promise"), contextID, 15000)
+		if err != nil {
+			return nil, err
+		}
+		if exception != "" {
+			return map[string]any{"error": "Evaluation error", "exception": exception}, nil
+		}
+		// 页侧助手习惯把结果 JSON.stringify 后回字符串：能解析就按解析后的形状摘要。
+		if text, ok := value.(string); ok {
+			var parsed any
+			if json.Unmarshal([]byte(text), &parsed) == nil {
+				value = parsed
+			}
+		}
+		return map[string]any{"ok": true, "summary": summarizeCallValue(value, 0)}, nil
 	case "miniapp_console_log":
 		if boolArg(args, "clear") {
 			if _, err := s.appCall(ctx, "console.clear", map[string]any{}); err != nil {
@@ -260,16 +382,25 @@ func (s *Server) callMiniappTool(ctx context.Context, name string, raw json.RawM
 			return nil, err
 		}
 		records := anySlice(objectMap(result)["records"])
+		redacted := redactEnabled(args)
 		logs := make([]any, 0, len(records))
 		for _, item := range records {
 			entry := objectMap(item)
 			if record, ok := entry["record"].(map[string]any); ok {
+				if redacted {
+					if masked, ok := redactAny(record).(map[string]any); ok {
+						record = masked
+					}
+				}
 				logs = append(logs, record)
 				continue
 			}
+			if redacted {
+				item = redactAny(item)
+			}
 			logs = append(logs, item)
 		}
-		return map[string]any{"logs": logs, "count": len(logs)}, nil
+		return map[string]any{"logs": logs, "count": len(logs), "redacted": redacted}, nil
 	case "miniapp_get_info":
 		result, err := s.appCall(ctx, "navigator.pages", map[string]any{})
 		if err != nil {
@@ -279,27 +410,55 @@ func (s *Server) callMiniappTool(ctx context.Context, name string, raw json.RawM
 		data["pages_count"] = len(anySlice(data["pages"]))
 		return data, nil
 	case "miniapp_page_stack":
-		return s.pageSnapshot(ctx)
+		return s.pageSnapshot(ctx, redactEnabled(args))
+	case "miniapp_a11y_tree":
+		return s.a11yTree(ctx)
 	case "miniapp_get_storage":
-		// key 缺省 = 全量（合并旧 miniapp_get_storage_key 的单键形态）。
+		redacted := redactEnabled(args)
+		// key 缺省 = 全量（合并旧 miniapp_get_storage_key 的单键形态）；
+		// mode:"keys" 只回键名与体长——先看有什么再决定要不要看内容。
+		if stringArg(args, "mode", "full") == "keys" {
+			result, err := s.evaluateStorage(ctx, `(function(){try{var i=wx.getStorageInfoSync(),k=i.keys||[],s={};for(var n=0;n<k.length;n++){try{s[k[n]]=JSON.stringify(wx.getStorageSync(k[n])).length}catch(e){s[k[n]]=-1}}return JSON.stringify({keys:k,sizes:s,currentSize:i.currentSize||0})}catch(e){return JSON.stringify({error:e.message})}})()`, 8000)
+			if err != nil {
+				return nil, err
+			}
+			if data := objectMap(result); data != nil {
+				data["mode"] = "keys"
+				return data, nil
+			}
+			return result, nil
+		}
 		if key := stringArg(args, "key", ""); key != "" {
 			result, err := s.evaluateStorage(ctx, `(function(){try{var v=wx.getStorageSync(`+jsLiteral(key)+`);return JSON.stringify({key:`+jsLiteral(key)+`,value:v,type:typeof v})}catch(e){return JSON.stringify({error:e.message})}})()`, 5000)
 			if err != nil {
 				return nil, err
 			}
+			if redacted {
+				result = redactAny(result)
+				// 单键读的 storage 键名本身敏感（读的就是 token）时值无条件掩：
+				// 回包字段名是通用的 "value"，键名规则看不见它。
+				if sensitiveKey(key) {
+					if m := objectMap(result); m != nil {
+						m["value"] = redactSensitiveValue(m["value"])
+					}
+				}
+			}
 			if capped, over := oversizedResult(result, storageResultCap); over {
 				return capped, nil
 			}
-			return result, nil
+			return stampRedacted(result, redacted), nil
 		}
 		result, err := s.evaluateStorage(ctx, `(function(){try{var i=wx.getStorageInfoSync(),r={},k=i.keys||[];for(var n=0;n<k.length;n++){try{r[k[n]]=wx.getStorageSync(k[n])}catch(e){}}return JSON.stringify({keys:k,data:r,currentSize:i.currentSize||0})}catch(e){return JSON.stringify({error:e.message})}})()`, 8000)
 		if err != nil {
 			return nil, err
 		}
+		if redacted {
+			result = redactAny(result)
+		}
 		if capped, over := oversizedResult(result, storageResultCap); over {
 			return capped, nil
 		}
-		return result, nil
+		return stampRedacted(result, redacted), nil
 	case "miniapp_get_storage_key":
 		key := stringArg(args, "key", "")
 		result, err := s.evaluateStorage(ctx, `(function(){try{var v=wx.getStorageSync(`+jsLiteral(key)+`);return JSON.stringify({key:`+jsLiteral(key)+`,value:v,type:typeof v})}catch(e){return JSON.stringify({error:e.message})}})()`, 5000)
@@ -307,11 +466,20 @@ func (s *Server) callMiniappTool(ctx context.Context, name string, raw json.RawM
 			return nil, err
 		}
 		// 合并形态 miniapp_get_storage 的单键读有同一顶 32KB 帽，旧名不得成为
-		// 绕开它的口子。
+		// 绕开它的口子；打码同口径——旧名同样不是绕开打码的口子。
+		redacted := redactEnabled(args)
+		if redacted {
+			result = redactAny(result)
+			if sensitiveKey(key) {
+				if m := objectMap(result); m != nil {
+					m["value"] = redactSensitiveValue(m["value"])
+				}
+			}
+		}
 		if capped, over := oversizedResult(result, storageResultCap); over {
 			return capped, nil
 		}
-		return result, nil
+		return stampRedacted(result, redacted), nil
 	case "miniapp_set_storage":
 		// 授权测试的篡改入口：改 token / 角色位 / 开关后复现行为。value 以
 		// JSON 文本进页面再 parse，保住对象/数组/数字的形状。
@@ -365,10 +533,18 @@ func (s *Server) callMiniappTool(ctx context.Context, name string, raw json.RawM
 		if truncated {
 			captures = captures[:cloudCapturesCap]
 		}
+		redacted := redactEnabled(args)
+		if redacted {
+			for index := range captures {
+				if masked, ok := redactAny(captures[index]).(map[string]any); ok {
+					captures[index] = masked
+				}
+			}
+		}
 		if boolArg(args, "clear") {
 			_ = s.deps.Core.HookClear(ctx, "cloud")
 		}
-		result := map[string]any{"captures": captures, "count": len(captures), "truncated": truncated}
+		result := map[string]any{"captures": captures, "count": len(captures), "truncated": truncated, "redacted": redacted}
 		if truncated {
 			result["note"] = "captures reached the page cap; page hook_drain {name:\"cloud\"} by cursor for the rest"
 		}
@@ -450,7 +626,22 @@ func (s *Server) callMiniappTool(ctx context.Context, name string, raw json.RawM
 		case int:
 			packagesProcessed = count
 		}
-		return map[string]any{"output_dir": outputDir, "files_count": filesCount, "packages_processed": packagesProcessed}, nil
+		// 页面→文件索引随反编译生成（page-index.json，主包/子包/插件分组）；
+		// 摘要进回包，全量清单用 miniapp_read_file 读。
+		pageIndex := map[string]any{"file": "page-index.json"}
+		if outputDir != "" {
+			if raw, err := os.ReadFile(filepath.Join(outputDir, "page-index.json")); err == nil {
+				var index struct {
+					Pages    []map[string]any `json:"pages"`
+					Packages map[string]int   `json:"packages"`
+				}
+				if json.Unmarshal(raw, &index) == nil {
+					pageIndex["pages"] = len(index.Pages)
+					pageIndex["packages"] = index.Packages
+				}
+			}
+		}
+		return map[string]any{"output_dir": outputDir, "files_count": filesCount, "packages_processed": packagesProcessed, "page_index": pageIndex}, nil
 	case "miniapp_scan_sensitive":
 		if s.deps.Scan == nil {
 			return nil, fmt.Errorf("scanner unavailable")
@@ -639,7 +830,10 @@ func (s *Server) callMiniappTool(ctx context.Context, name string, raw json.RawM
 // pageSnapshot 合并两个页面读：navigator.pageStack（运行时栈 {stack,current}）
 // 与 navigator.pages（配置页 {pages,tab_bar_pages,current_route}）。两边各自
 // best-effort：一边失败不拖垮另一边，失败以 *_error 字段内联。
-func (s *Server) pageSnapshot(ctx context.Context) (any, error) {
+// pageSnapshot 是 miniapp_page_stack 的实现：redacted 时栈上各层的 query
+// 值打码（键名保留）——证照页跳统一认证把会话类参数挂在 query 上的场景，
+// 实值不该原样落进 agent transcript。
+func (s *Server) pageSnapshot(ctx context.Context, redacted bool) (any, error) {
 	stackRes, stackErr := s.appCall(ctx, "navigator.pageStack", map[string]any{})
 	pagesRes, pagesErr := s.appCall(ctx, "navigator.pages", map[string]any{})
 	if stackErr != nil && pagesErr != nil {
@@ -650,7 +844,11 @@ func (s *Server) pageSnapshot(ctx context.Context) (any, error) {
 		out["stack_error"] = stackErr.Error()
 	} else {
 		data := objectMap(stackRes)
-		out["stack"] = data["stack"]
+		stack := data["stack"]
+		if redacted {
+			stack = redactAny(stack)
+		}
+		out["stack"] = stack
 		out["stack_depth"] = len(anySlice(data["stack"]))
 		out["current_route"] = data["current"]
 	}
@@ -664,6 +862,7 @@ func (s *Server) pageSnapshot(ctx context.Context) (any, error) {
 			out["current_route"] = data["current_route"]
 		}
 	}
+	out["redacted"] = redacted
 	return out, nil
 }
 
@@ -733,6 +932,33 @@ func (s *Server) contextAnswers(ctx context.Context, id int, probe string) bool 
 	}
 	text, ok := value.(string)
 	return ok && text == contextProbeYes
+}
+
+// contextIDValue coerces a Core contexts entry id (JSON-decoded numbers are
+// float64; the RPC may also hand back int64).
+func contextIDValue(raw any) (int, bool) {
+	switch value := raw.(type) {
+	case float64:
+		return int(value), true
+	case int64:
+		return int(value), true
+	case int:
+		return value, true
+	}
+	return 0, false
+}
+
+// contextRoute reads one webview context's body[is] marker — the route that
+// page is showing. Empty when the context has no DOM (the appservice) or the
+// marker is absent.
+func (s *Server) contextRoute(ctx context.Context, id int) string {
+	candidate := id
+	value, err := s.evaluateJSON(ctx, `(function(){return (document.body&&document.body.getAttribute("is"))||""})()`, false, &candidate, contextProbeTimeoutMs)
+	if err != nil {
+		return ""
+	}
+	route, _ := value.(string)
+	return route
 }
 
 const appServiceProbe = `(function(){return typeof wx==='object'&&typeof getApp==='function'?` +
@@ -891,6 +1117,39 @@ func (s *Server) evaluate(ctx context.Context, expression string, await bool, co
 }
 
 func (s *Server) evaluateDetail(ctx context.Context, expression string, await bool, contextID *int, timeoutMs int) (any, string, string, error) {
+	value, valueType, exception, err := s.evaluateOnce(ctx, expression, await, contextID, timeoutMs)
+	// WMPF 把 Runtime.evaluate 的表达式按「表达式位置」编译：语句级输入
+	// （var/function 声明、分号）直接抛 SyntaxError——实测嵌套函数声明必炸，
+	// 而展平的 IIFE 正常。已经写成 IIFE 的不重试（双重包装会把返回值吃成
+	// undefined）；其余用 IIFE 重试一次，取值需要显式 return，工具描述已写明。
+	if err == nil && exception != "" && strings.Contains(exception, "SyntaxError") && !iifePrefixed(expression) {
+		wrapper := "(function(){\n%s\n})()"
+		if await {
+			wrapper = "(async function(){\n%s\n})()"
+		}
+		value, valueType, exception, err = s.evaluateOnce(ctx, fmt.Sprintf(wrapper, expression), await, contextID, timeoutMs)
+	}
+	// 超时的命令早已发给小程序（副作用已发生），迟到响应在 Core 桥被静默丢弃
+	// ——只回失败会把 agent 引去怀疑「没写进去」，所以把这一事实写进错误。
+	if err != nil && strings.Contains(err.Error(), "timed out") {
+		return value, valueType, exception, fmt.Errorf("%s (the command was dispatched and may have taken effect - late responses are dropped)", err)
+	}
+	return value, valueType, exception, err
+}
+
+// iifePrefixed reports whether the expression already opens as an IIFE, which
+// the SyntaxError retry must not double-wrap.
+func iifePrefixed(expression string) bool {
+	trimmed := strings.TrimSpace(expression)
+	for _, prefix := range []string{"(function", "(async", "( async", "async function"} {
+		if strings.HasPrefix(trimmed, prefix) {
+			return true
+		}
+	}
+	return false
+}
+
+func (s *Server) evaluateOnce(ctx context.Context, expression string, await bool, contextID *int, timeoutMs int) (any, string, string, error) {
 	params := map[string]any{"expression": expression, "returnByValue": true}
 	if await {
 		params["awaitPromise"] = true
@@ -901,6 +1160,17 @@ func (s *Server) evaluateDetail(ctx context.Context, expression string, await bo
 	resp, err := s.cdp(ctx, "Runtime.evaluate", params, timeoutMs)
 	if err != nil {
 		return nil, "", "", err
+	}
+	// Core 桥会把 WMPF 的 {id, error:{...}} 回执 reject 成 err；这一层兜底
+	// 防的是旧 Core 或直连响应仍以 error 信封出现在 result 位置的情况——
+	// 不查它，对不存在 context 的求值就会回 {"type":"","value":null}，
+	// 与真空返回无法区分。
+	if errEnvelope, ok := nested(resp, "error").(map[string]any); ok {
+		message, _ := errEnvelope["message"].(string)
+		if message == "" {
+			message = fmt.Sprintf("CDP error: %v", errEnvelope)
+		}
+		return nil, "", "", fmt.Errorf("%s", message)
 	}
 	result, _ := nested(resp, "result").(map[string]any)
 	if details, ok := result["exceptionDetails"].(map[string]any); ok {
@@ -913,6 +1183,227 @@ func (s *Server) evaluateDetail(ctx context.Context, expression string, await bo
 	inner, _ := result["result"].(map[string]any)
 	valueType, _ := inner["type"].(string)
 	return inner["value"], valueType, "", nil
+}
+
+// a11yNodeCap / a11yTextCap / a11yDepthCap bound the accessibility tree walk.
+const (
+	a11yNodeCap  = 300
+	a11yTextCap  = 64
+	a11yDepthCap = 18
+)
+
+// a11yTree walks the current page webview's DOM: per node the tag, trimmed
+// leaf text and bounding rect, addressed by a stable sibling-index path
+// ("0/2/1") so miniapp_click {node_path} re-resolves it statelessly. Event
+// names are deliberately absent for now: the exparser bridge that would expose
+// them is still being verified live, and a guessed API would lie about what a
+// node handles — click {node_path} already dispatches exparser tap when the
+// bridge answers.
+func (s *Server) a11yTree(ctx context.Context) (any, error) {
+	contextID, err := s.pageContextID(ctx)
+	if err != nil {
+		return nil, err
+	}
+	expression := `(function(){var MAXN=` + strconv.Itoa(a11yNodeCap) + `,MAXT=` + strconv.Itoa(a11yTextCap) + `,MAXD=` + strconv.Itoa(a11yDepthCap) + `;var out=[],truncated=false;function childPath(path,i){return path===''?String(i):path+'/'+i}function rect(el){var r=el.getBoundingClientRect();return [Math.round(r.left),Math.round(r.top),Math.round(r.width),Math.round(r.height)]}function walk(el,path,depth){var kids=el.children||[];for(var i=0;i<kids.length;i++){if(out.length>=MAXN||depth>MAXD){truncated=true;return}var c=kids[i];var tag=(c.tagName||'').toLowerCase();if(tag==='script'||tag==='style'){continue}var p=childPath(path,i);var node={path:p,tag:tag,rect:rect(c)};if(c.childElementCount===0){var text=(c.textContent||'').replace(/\s+/g,' ').trim();if(text)node.text=text.slice(0,MAXT)}out.push(node);walk(c,p,depth+1)}}if(document.body){walk(document.body,'',0)}return JSON.stringify({route:(document.body&&document.body.getAttribute("is"))||"",nodes:out,count:out.length,truncated:truncated})})()`
+	return s.evaluateJSON(ctx, expression, false, contextID, 10000)
+}
+
+// callSummaryDepth bounds how deep the call-result summary walks;
+// callSummaryKeys bounds how wide one object is summarized (keys sorted for a
+// deterministic reply).
+const (
+	callSummaryDepth = 4
+	callSummaryKeys  = 64
+)
+
+// summarizeCallValue renders a call result as its shape: leaves become
+// type+length (a number with ten or more digits becomes just its digit count),
+// objects keep key names with summarized values, arrays their length plus the
+// first three items, sensitive keys collapse entirely. Depth 4, width 64 keys
+// — beyond either only the container size. The point: field values — tokens
+// included — never leave the miniapp; the agent steers by the shape alone.
+func summarizeCallValue(value any, depth int) any {
+	switch typed := value.(type) {
+	case map[string]any:
+		if depth >= callSummaryDepth {
+			return map[string]any{"type": "object", "keys": len(typed)}
+		}
+		names := make([]string, 0, len(typed))
+		for key := range typed {
+			names = append(names, key)
+		}
+		sort.Strings(names)
+		out := make(map[string]any, len(names))
+		shown := names
+		if len(shown) > callSummaryKeys {
+			shown = shown[:callSummaryKeys]
+		}
+		for _, key := range shown {
+			if sensitiveKey(key) {
+				out[key] = redactSensitiveValue(typed[key])
+				continue
+			}
+			out[key] = summarizeCallValue(typed[key], depth+1)
+		}
+		if omitted := len(names) - len(shown); omitted > 0 {
+			out["…keys_omitted"] = omitted
+		}
+		return out
+	case []any:
+		summary := map[string]any{"type": "array", "len": len(typed)}
+		if depth < callSummaryDepth {
+			preview := typed
+			if len(preview) > 3 {
+				preview = preview[:3]
+			}
+			items := make([]any, 0, len(preview))
+			for _, item := range preview {
+				items = append(items, summarizeCallValue(item, depth+1))
+			}
+			summary["items"] = items
+		}
+		return summary
+	case string:
+		return map[string]any{"type": "string", "len": len([]rune(typed))}
+	case float64:
+		digits := len(strings.Trim(strings.Trim(strconv.FormatFloat(typed, 'f', -1, 64), "-"), "."))
+		if digits >= 10 {
+			return map[string]any{"type": "number", "digits": digits}
+		}
+		return typed
+	case bool, nil:
+		return typed
+	default:
+		return map[string]any{"type": fmt.Sprintf("%T", value)}
+	}
+}
+
+// navigationVerifyTimeout / navigationVerifyPoll shape the post-dispatch
+// verification window; vars so tests can shrink the real-clock wait.
+var (
+	navigationVerifyTimeout = 5 * time.Second
+	navigationVerifyPoll    = 300 * time.Millisecond
+)
+
+// stackShape reads the current page stack depth and top route. A failed read
+// is (0, "") — navigateBack verification then cannot prove a depth change and
+// accepts the first successful stack read instead.
+func (s *Server) stackShape(ctx context.Context) (int, string) {
+	stack, err := s.appCall(ctx, "navigator.pageStack", map[string]any{})
+	if err != nil {
+		return 0, ""
+	}
+	layers := anySlice(objectMap(stack)["stack"])
+	if len(layers) == 0 {
+		return 0, ""
+	}
+	top, _ := objectMap(layers[len(layers)-1])["route"].(string)
+	return len(layers), top
+}
+
+// verifyNavigation polls the real page stack until the navigation lands:
+// forward navigations must show the expected route on top, navigateBack must
+// shrink the stack by delta. A fresh layer can read "" while its webview is
+// still mounting (observed live) — the page webview's body[is] fills it in
+// before we declare failure. The wx success callback alone is not evidence:
+// live testing saw ok answers with the stack unchanged and with empty routes.
+func (s *Server) verifyNavigation(ctx context.Context, method, expected string, delta, beforeDepth int, beforeTop string) (string, error) {
+	deadline := time.Now().Add(navigationVerifyTimeout)
+	observed := ""
+	bodyRouteDone := false
+	for {
+		stack, err := s.appCall(ctx, "navigator.pageStack", map[string]any{})
+		if err == nil {
+			layers := anySlice(objectMap(stack)["stack"])
+			depth := len(layers)
+			if depth > 0 {
+				observed, _ = objectMap(layers[depth-1])["route"].(string)
+				// 空路由只扫一次 body[is]（每次核验最多 24 个探测，别随轮询翻倍）。
+				if observed == "" && !bodyRouteDone {
+					observed = s.bodyRoute(ctx)
+					bodyRouteDone = true
+				}
+			}
+			if method == "navigateBack" {
+				if beforeDepth == 0 {
+					// 分发前的栈读不到，深度收敛无从谈起——分发成功即认。
+					return observed, nil
+				}
+				// 深度真的减了 delta 即为落地。不看栈顶路由：相同页面连压两次
+				// 再回退时栈顶路由不变，拿它比对会把真落地误判成假 ok。
+				if depth > 0 && depth <= beforeDepth-delta {
+					return observed, nil
+				}
+			} else if observed != "" && observed == expected {
+				return observed, nil
+			}
+		}
+		if time.Now().After(deadline) {
+			break
+		}
+		time.Sleep(navigationVerifyPoll)
+	}
+	if method == "navigateBack" {
+		return observed, fmt.Errorf("navigation did not land: stack depth did not shrink by %d within %s (top layer: %q)", delta, navigationVerifyTimeout, observed)
+	}
+	return observed, fmt.Errorf("navigation did not land: expected %q on top of the stack within %s, got %q", expected, navigationVerifyTimeout, observed)
+}
+
+// bodyRoute scans the page webviews for a body[is] marker and returns the
+// newest one — used to fill in a stack layer whose route still reads "" while
+// the webview has already mounted. Context ids are handed out in creation
+// order, so the scan goes from the highest id down: the newest webview is the
+// one the top stack layer belongs to; a lower id's route would be a background
+// page's. Probes are bounded (1s each) and stop at the first hit. The
+// attribute is read with double quotes on purpose: the single-quoted form
+// collides with the context resolver's probe marker and would read its canned
+// "no" as a route.
+func (s *Server) bodyRoute(ctx context.Context) string {
+	for id := contextProbeMaxID; id >= 1; id-- {
+		contextID := id
+		value, err := s.evaluateJSON(ctx, `(function(){return (document.body&&document.body.getAttribute("is"))||""})()`, false, &contextID, 1000)
+		if err != nil {
+			continue
+		}
+		if route, ok := value.(string); ok && route != "" {
+			return route
+		}
+	}
+	return ""
+}
+
+// navigateBackInPageWebview retries navigateBack inside the current page's
+// webview: a foreground plugin page refuses appservice-side dispatches
+// ("rejected due to no permission currently", observed live), while the page
+// webview's own wx.navigateBack goes through.
+func (s *Server) navigateBackInPageWebview(ctx context.Context, delta int) error {
+	contextID, err := s.pageContextID(ctx)
+	if err != nil {
+		return err
+	}
+	_, err = s.evaluate(ctx, fmt.Sprintf(`new Promise(function(r){wx.navigateBack({delta:%d,complete:r})})`, delta), true, contextID, 5000)
+	return err
+}
+
+// screenshotNote attaches this capture's route and viewport: the screenshot
+// goes to the locked connection's browser-level endpoint and can disagree with
+// the page stack (stack says page A, image shows page B — observed live). The
+// metadata rides with the image so the agent can self-check what it captured.
+func (s *Server) screenshotNote(ctx context.Context) string {
+	var parts []string
+	if route, err := s.appCall(ctx, "navigator.currentRoute", map[string]any{}); err == nil {
+		if value, _ := objectMap(route)["route"].(string); value != "" {
+			parts = append(parts, "route:"+value)
+		}
+	}
+	if contextID, err := s.pageContextID(ctx); err == nil {
+		value, err := s.evaluateJSON(ctx, `(function(){return JSON.stringify({w:window.innerWidth,h:window.innerHeight,dpr:window.devicePixelRatio||1})})()`, false, contextID, 3000)
+		if err == nil {
+			view := objectMap(value)
+			parts = append(parts, fmt.Sprintf("viewport:%gx%g dpr:%g", view["w"], view["h"], view["dpr"]))
+		}
+	}
+	return strings.Join(parts, " ")
 }
 
 func (s *Server) evaluateJSON(ctx context.Context, expression string, await bool, contextID *int, timeoutMs int) (any, error) {

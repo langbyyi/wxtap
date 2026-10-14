@@ -40,6 +40,7 @@ func (s *Server) hookWait(ctx context.Context, raw json.RawMessage) (any, error)
 	if name != "wxapi" && name != "cloud" {
 		return nil, fmt.Errorf("name must be one of: cloud, wxapi")
 	}
+	redacted := redactEnabled(args)
 	afterSeq := int64(intArg(args, "afterSeq", 0))
 	limit := intArg(args, "limit", 50)
 	if limit <= 0 {
@@ -64,16 +65,26 @@ func (s *Server) hookWait(ctx context.Context, raw json.RawMessage) (any, error)
 			return nil, err
 		}
 		if len(page.Records) > 0 {
+			// 与 hook_drain 同一打码口径：共享同一份 payload 的近邻工具不能成为
+			// redact 的旁路。
+			if redacted {
+				for index := range page.Records {
+					if masked, ok := redactAny(page.Records[index].Record).(map[string]any); ok {
+						page.Records[index].Record = masked
+					}
+				}
+			}
 			return map[string]any{
 				"name": name, "records": page.Records, "nextSeq": page.NextSeq,
 				"hasMore": page.HasMore, "waitedMs": time.Since(start).Milliseconds(),
-				"timedOut": false,
+				"timedOut": false, "redacted": redacted,
 			}, nil
 		}
 		if time.Now().After(deadline) {
 			return map[string]any{
 				"name": name, "records": []DrainedRecord{}, "nextSeq": afterSeq,
 				"hasMore": false, "waitedMs": time.Since(start).Milliseconds(), "timedOut": true,
+				"redacted": redacted,
 			}, nil
 		}
 		select {
@@ -121,23 +132,28 @@ func (s *Server) trafficRecords(ctx context.Context, raw json.RawMessage) (any, 
 	if err != nil {
 		return nil, err
 	}
+	redacted := redactEnabled(args)
 
 	items := make([]map[string]any, 0, len(page.Items))
 	for _, item := range page.Items {
+		url := item.URL
+		if redacted {
+			url = redactString(url)
+		}
 		entry := map[string]any{
 			"id": item.ID, "seq": item.Seq, "capturedAt": item.CapturedAt,
 			"apiType": item.APType, "appId": item.AppID, "name": item.Name,
-			"method": item.Method, "url": item.URL, "status": item.Status,
+			"method": item.Method, "url": url, "status": item.Status,
 			"requestBytes": item.RequestBytes, "responseBytes": item.ResponseBytes,
 			"durationMs": item.DurationMs,
 		}
 		if bodyBytes > 0 {
-			entry["request_body"] = s.bodyPreview(ctx, item.ID, "request", bodyBytes)
-			entry["response_body"] = s.bodyPreview(ctx, item.ID, "response", bodyBytes)
+			entry["request_body"] = s.bodyPreview(ctx, item.ID, "request", bodyBytes, redacted)
+			entry["response_body"] = s.bodyPreview(ctx, item.ID, "response", bodyBytes, redacted)
 		}
 		items = append(items, entry)
 	}
-	return map[string]any{"items": items, "total": page.Total, "count": len(items)}, nil
+	return map[string]any{"items": items, "total": page.Total, "count": len(items), "redacted": redacted}, nil
 }
 
 // awaitHookRecords 轮询记录流直到新记录落地或超时；游标全程保持调用者的
@@ -168,7 +184,8 @@ func (s *Server) awaitHookRecords(ctx context.Context, name string, afterSeq int
 }
 
 // bodyPreview 取一段文体并截断到 max；非 UTF-8（图片等二进制）不内联。
-func (s *Server) bodyPreview(ctx context.Context, id string, part string, max int) map[string]any {
+// redacted 时先打码后截断——截断会把掩码劈开；bytes 恒报库里的原始长度。
+func (s *Server) bodyPreview(ctx context.Context, id string, part string, max int, redacted bool) map[string]any {
 	body, err := s.deps.Traffic.GetBody(ctx, id, part)
 	if err != nil {
 		return map[string]any{"error": err.Error()}
@@ -176,13 +193,16 @@ func (s *Server) bodyPreview(ctx context.Context, id string, part string, max in
 	if !utf8.Valid(body) {
 		return map[string]any{"binary": true, "bytes": len(body)}
 	}
+	if redacted {
+		body, _ = redactBody(body)
+	}
 	if len(body) <= max {
-		return map[string]any{"text": string(body), "bytes": len(body), "truncated": false}
+		return map[string]any{"text": string(body), "bytes": len(body), "truncated": false, "redacted": redacted}
 	}
 	// 按字节截断会劈开多字节字符；退到 UTF-8 边界，与 miniapp_read_file 同法。
 	text := string(body[:max])
 	for i := 0; i < 4 && !utf8.ValidString(text); i++ {
 		text = text[:len(text)-1]
 	}
-	return map[string]any{"text": text, "bytes": len(body), "truncated": true}
+	return map[string]any{"text": text, "bytes": len(body), "truncated": true, "redacted": redacted}
 }

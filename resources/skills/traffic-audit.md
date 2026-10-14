@@ -15,7 +15,7 @@
 hook_drain {name, afterSeq, limit, afterUpdateSeq, updateLimit, waitMs}
 ```
 
-- **记录流** — 以 `afterSeq` 游标分页，将上一页的 `nextSeq` 回填以读取下一页。
+- **记录流** — 以 `afterSeq` 游标分页，将上一页的 `nextSeq` 回填以读取下一页。**采集窗口**：新启动一个钩子会清一次页内缓冲，此后 `afterSeq:0` 只覆盖本次采集窗口——旧 cursor 不会把跨天历史整段带回；记录默认打码（token/cookie/手机号/证件号，掩码保留头尾形状），`redact:false` 才出原值。`hook_wait` 与 `miniapp_cloud_captures` 同一口径。
 - **落定更新流** — 异步调用的 `status`、返回值与 `durationMs` 在其记录被取走后才落地，作为独立帧投递。必须将上一页的 `nextUpdateSeq` 回填到 `afterUpdateSeq`；不回填（保持 0）将始终重读最旧的一批更新。
 - **`updateLimit`** — 缺省取一个小窗口（200）。传 `0` 表示本页不读取更新且游标不动，但该语义仅在 `afterUpdateSeq` 非 0 时成立：`afterUpdateSeq:0` 与 `updateLimit:0` 同时出现时按缺省处理，取 200 条。需要读取更新时必须填写 `afterUpdateSeq`。
 - 仅读记录流而不读更新流的调用会将异步调用判定为「永久 pending」。下结论前应补齐更新流。
@@ -39,8 +39,8 @@ hook_drain {name, afterSeq, limit, afterUpdateSeq, updateLimit, waitMs}
 
 ## 4. 入库流检索
 
-- `traffic_records {query?, apiType?, status?, appId?, page?, limit?, bodyBytes?}` — 单页聚合视图：摘要与每条记录截断后的正反文体（二进制内容标注为 binary，不内联），可省去逐条调用 `traffic_get_body` 的往返。`page` 从 1 起（缺省 1），`limit` 缺省 20（上限 50），`bodyBytes` 缺省 2048（上限 16384）；`bodyBytes:0` 返回不含文体的列表。返回里的 `total` 是同一套筛选条件下的总条数，按它算页数；列表**最新在前**，第 1 页就是最近的一批。注意 offset 窗口在捕获进行中会随新记录移动（后面的页整体后移），要**不重不漏**地跟一条记录流请用 `hook_drain` 的 `afterSeq`，不要靠翻页。
-- `traffic_get_body {id, part:"request"|"response"}` — 获取完整文体（`part` 缺省为 `response`）。超过 256KB 时截断，并标注 `truncated:true` 与 `totalBytes`。用于检索明文凭据、token、身份证号与内部接口参数。
+- `traffic_records {query?, apiType?, status?, appId?, page?, limit?, bodyBytes?, redact?}` — 单页聚合视图：摘要与每条记录截断后的正反文体（二进制内容标注为 binary，不内联），可省去逐条调用 `traffic_get_body` 的往返。URL 与体预览默认打码（`redact:false` 出原值）。`page` 从 1 起（缺省 1），`limit` 缺省 20（上限 50），`bodyBytes` 缺省 2048（上限 16384）；`bodyBytes:0` 返回不含文体的列表。返回里的 `total` 是同一套筛选条件下的总条数，按它算页数；列表**最新在前**，第 1 页就是最近的一批。注意 offset 窗口在捕获进行中会随新记录移动（后面的页整体后移），要**不重不漏**地跟一条记录流请用 `hook_drain` 的 `afterSeq`，不要靠翻页。
+- `traffic_get_body {id, part:"request"|"response", redact?}` — 获取完整文体（`part` 缺省为 `response`）。默认打码；`redact:false` 出库里的原文。超过 256KB 时截断（先打码后截断），并标注 `truncated:true` 与 `totalBytes`（原始长度）。用于检索明文凭据、token、身份证号与内部接口参数。
 - `traffic_stats` — 库大小（`bytes`）、时间范围（`oldestCapturedAt` / `newestCapturedAt`）与过载丢弃计数。引用历史流量前应先核对其时间范围是否覆盖目标区间。
 
 ## 5. 主动验证

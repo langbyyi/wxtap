@@ -6,15 +6,15 @@
 
 ## 快速路径：单次调用完成引导
 
-`session_start` 按固定顺序执行：前置检查 → `engine_start` → 选目标（唯一连接自动锁定；多开时传 `target:<id>`）→ 开采集（`hooks` 缺省为 `["wxapi"]`，可追加 `"cloud"`，传 `[]` 表示本轮不采集）→ 汇总快照。引擎与采集两段是幂等的（已在跑即早返回），但**传 `target:<id>` 时并非「什么都不做」**：换目标会重置页面 generation 与两个 feeder 的 ack —— 新目标有自己的页内序号空间。重复调用仍不会产生重复读数：重读的帧由 shell 的去重 FIFO 抑制，面板按 `rid` 原地覆写。
+`session_start` 按固定顺序执行：前置检查 → `engine_start` → 选目标（唯一连接自动锁定；多开时传 `target:<id>`）→ 开采集（`hooks` 缺省为 `["wxapi"]`，可追加 `"cloud"`，传 `[]` 表示本轮不采集）→ 汇总快照。整个调用是状态感知的幂等：引擎已附加时不再重建；**`target` 与当前锁定一致时不再重跑 switch**（重复 switch 会重置页面 generation 与 feeder ack，等于把正在工作的会话拆了重来——只有真的换目标才切，并强制重装钩子）。钩子按三态判定：没在跑 → 启动；在跑但断线（引擎重启、切页重建让页内钩子消失）→ 停止再启动；健康 → 跳过（回包标 `already:true`）。新启动会清一次页内记录缓冲：`hook_drain` 的 `afterSeq=0` 从本次启动起算，旧 cursor 不会再回放跨天历史。
 
 任一步失败即停止，返回 `ok:false`、`step`（失败的步骤）与 `error`（原因），并带回已取得的诊断信息（node/wechat 状态、`available` 目标清单）。按返回内容如实转述，不补充推测。
 
-`session_status` 为该流程的只读形式：一次返回引擎状态、锁定目标、页面栈、采集健康（丢弃计数）与库大小，不产生副作用。
+`session_status` 为该流程的只读形式：一次返回引擎状态、锁定目标、页面栈、采集健康（丢弃计数）与库大小，不产生副作用。另外：由 MCP 侧启动过采集之后，若采集在会话中途断线（feeder 停了、或 realm 重建后页内钩子没了），`miniapp_*` 会话类工具与 `hook_drain` 的回包会带上 `capture_health` 字段——看到它就重跑 `session_start`，健康时该字段不出现。
 
 ## 分步路径
 
-仅在需要逐步归因时使用，顺序与快速路径一致。缺省广播的是 lean 目录（只有合并形态与高杠杆工具），本节的 `node_status`、`wechat_status`、`engine_status`、`miniapp_list`、`miniapp_switch`、`engine_stop` 不在其中；第 7 步的 `hook_start` / `hook_drain` 在。不在目录里的照名调用仍然有效。
+仅在需要逐步归因时使用，顺序与快速路径一致。本节第 1-4 步（`node_status` / `wechat_status` / `engine_start` / `engine_status`）与 `miniapp_list`、`miniapp_switch`、`targets_list`、`miniapp_list_contexts`、`targets_probe` 都在 lean 目录里；`engine_stop` 不在（收尾走 `session_status` 观察引擎状态，或用 `-tools=all` 档案）。**只有 `tools/list` 广播的名字保证可被客户端调用**——客户端按目录预过滤，目录外的名字（合并吸收的旧形态等）只有硬编码直呼的旧客户端才用得上。
 
 1. `node_status` — Node 22+ 是所有前置条件的前提。Core 由该运行时启动；不满足时引擎与采集类工具均会报错，归因应从该项开始。
 2. `wechat_status` — 该工具不产生错误：`error` 非空表示检测本身失败；`running:false` 表示微信未运行；`addressTable:false` 表示静态地址表未覆盖当前构建或架构；仅 Windows 旧布局缺表时可自动检测，其他缺表情况需补表，缺少架构不能正常挂钩。区分「微信未运行」与「微信版本不支持」以该项最快。

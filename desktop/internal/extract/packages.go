@@ -42,6 +42,9 @@ func DecompilePackages(packagePaths []string, outDir, appID string) ([]string, e
 	if _, err := RestoreSourceTree(stagedRoot); err != nil {
 		return nil, err
 	}
+	// 页面→文件索引随树一起换入 outDir；生成失败不拦反编译——索引是增益，
+	// 不是产物本身。
+	_ = writePageIndex(stagedRoot)
 	files, err := treeFiles(stagedRoot, outDir)
 	if err != nil {
 		return nil, err

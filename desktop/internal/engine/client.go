@@ -301,6 +301,19 @@ func (c *Client) CloudScan(ctx context.Context) ([]map[string]any, error) {
 	return items, nil
 }
 
+// Contexts reads the Core's event-fed execution-context registry of the active
+// target (cdp.contexts). Empty when the host shim emits no context events —
+// the caller falls back to its probe.
+func (c *Client) Contexts(ctx context.Context) ([]map[string]any, error) {
+	var payload struct {
+		Contexts []map[string]any `json:"contexts"`
+	}
+	if err := c.call(ctx, "cdp.contexts", map[string]any{}, &payload); err != nil {
+		return nil, err
+	}
+	return payload.Contexts, nil
+}
+
 // Evaluate runs a JS expression in the miniapp runtime and returns the
 // parsed value from Runtime.evaluate (returnByValue).
 func (c *Client) Evaluate(ctx context.Context, expression string, timeoutMs int) (any, error) {

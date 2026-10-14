@@ -154,6 +154,11 @@ export class CdpBridge {
   private pageGeneration = 0;
   private lockEnabled = true;
   private lockedClientId: number | undefined;
+  // Runtime execution-context lifecycle events, per connection: the
+  // authoritative context registry for miniapp_list_contexts. The WMPF shim
+  // may not emit these — listContexts answers empty then, and the Go side
+  // falls back to its bounded probe.
+  private readonly contexts = new Map<number, Map<number, Record<string, unknown>>>();
   private readonly probeDelayMs: number;
   private readonly h5: H5Sessions;
 
@@ -208,6 +213,7 @@ export class CdpBridge {
     this.reloadedPausePolicies.delete(id);
     this.consoleEnabled.delete(id);
     this.debuggerEnabled.delete(id);
+    this.contexts.delete(id);
     if (this.miniapps.delete(id) && this.lockedClientId === id) {
       this.lockedClientId = undefined;
       // 锁定目标下线：覆盖标志随它的 realm 一起作废（同 setupContext 分支）。
@@ -386,6 +392,9 @@ export class CdpBridge {
     if (message.category === "setupContext" && clientId !== undefined) {
       this.h5.invalidate(clientId, "小程序页面上下文已重建");
       this.pausedPeers.delete(clientId);
+      // realm 重建 = 该连接的全部执行上下文作废重造：注册表必须清空，否则
+      // 旧 context id 以死条目残留，list_contexts 会把已销毁的上下文当活的报。
+      this.contexts.delete(clientId);
       // Only the active realm drives hook auto-injection. A background
       // miniapp refreshing must not make the status poller reinstall hooks
       // in the locked realm.
@@ -459,6 +468,9 @@ export class CdpBridge {
     // Peer-private lifecycle facts remain relevant even while another peer
     // owns the lock. They must not be broadcast to that other peer's DevTools.
     if (clientId !== undefined && response !== undefined) {
+      // 上下文注册表是连接级簿记：未锁连接的事件也要记，否则切锁后新目标的
+      // 注册表是空的，list_contexts 只能退回探测。
+      this.captureContextEvent(clientId, response);
       if (response.method === "Debugger.paused") this.pausedPeers.add(clientId);
       if (response.method === "Debugger.resumed") this.pausedPeers.delete(clientId);
       if (response.method === "Debugger.globalObjectCleared") {
@@ -491,7 +503,61 @@ export class CdpBridge {
     }
     clearTimeout(pending.timeout);
     this.pending.delete(id);
+    // WMPF 的 CDP shim 对非法 contextId / 域名错误回 {id, error:{...}} 而不是
+    // result。按「命中 id 即成功」resolve 会让错误变成 {result:null} 的假成功，
+    // agent 端看到的是 {"type":"","value":null}，与真空返回无法区分——必须
+    // 在这里转成真正的 reject。
+    if (isRecord(response.error)) {
+      const message = textOf(response.error.message);
+      pending.reject(new Error(message === "" ? `CDP error: ${JSON.stringify(response.error)}` : message));
+      return;
+    }
     pending.resolve(response);
+  }
+
+  /** Runtime execution-context lifecycle events, per connection: created /
+   * destroyed / cleared feed the registry listContexts reads. */
+  private captureContextEvent(clientId: number | undefined, response: Record<string, unknown>): void {
+    if (clientId === undefined) {
+      return;
+    }
+    const params = isRecord(response.params) ? response.params : {};
+    switch (response.method) {
+      case "Runtime.executionContextCreated": {
+        const context = isRecord(params.context) ? params.context : undefined;
+        if (context === undefined || typeof context.id !== "number") {
+          return;
+        }
+        let ring = this.contexts.get(clientId);
+        if (ring === undefined) {
+          ring = new Map<number, Record<string, unknown>>();
+          this.contexts.set(clientId, ring);
+        }
+        ring.set(context.id, { id: context.id, name: textOf(context.name), origin: textOf(context.origin) });
+        return;
+      }
+      case "Runtime.executionContextDestroyed": {
+        if (typeof params.executionContextId === "number") {
+          this.contexts.get(clientId)?.delete(params.executionContextId);
+        }
+        return;
+      }
+      case "Runtime.executionContextsCleared":
+        this.contexts.delete(clientId);
+        return;
+    }
+  }
+
+  /** Execution contexts of the active target, event-fed. Empty (not an error)
+   * when the shim emits none — the caller falls back to its probe. */
+  listContexts(): Array<Record<string, unknown>> {
+    const active = this.lockedClientId !== undefined && this.miniapps.has(this.lockedClientId)
+      ? this.lockedClientId
+      : [...this.miniapps.keys()][0];
+    if (active === undefined) {
+      return [];
+    }
+    return [...(this.contexts.get(active)?.values() ?? [])];
   }
 
   /** 让 miniapp 连接开始上报 console 事件（每个连接一次；realm 重建后事件照旧）。

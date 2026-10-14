@@ -253,6 +253,8 @@ func TestInitializeAndToolList(t *testing.T) {
 	}
 	for _, want := range []string{
 		"session_start", "session_status",
+		"node_status", "wechat_status", "engine_start", "engine_status",
+		"miniapp_list", "miniapp_switch", "targets_list", "miniapp_list_contexts",
 		"hook_start", "hook_stop", "hook_drain",
 		"traffic_records", "traffic_get_body", "scan_dir",
 		"miniapp_screenshot", "miniapp_click", "miniapp_type", "miniapp_navigate",
@@ -273,8 +275,7 @@ func TestInitializeAndToolList(t *testing.T) {
 	}
 	for _, absorbed := range []string{
 		"traffic_list", "traffic_stats", "hook_wait", "hook_stats",
-		"wechat_status", "node_status", "engine_status", "engine_start", "engine_stop",
-		"miniapp_list", "miniapp_switch", "targets_list",
+		"engine_stop",
 		"miniapp_get_info", "miniapp_get_routes", "miniapp_get_current_route",
 		"navigator_page_stack", "navigator_auto_visit", "navigator_auto_visit_state",
 		"navigator_stop_auto_visit",
@@ -718,6 +719,10 @@ func (fakeCore) DebugState(_ context.Context, _ bool) (map[string]any, error) {
 	}, nil
 }
 
+// fakeCore serves an empty context registry: the list_contexts tool falls back
+// to its bounded probe, matching a shim that emits no context events.
+func (fakeCore) Contexts(context.Context) ([]map[string]any, error) { return nil, nil }
+
 func (fakeCore) CloudScan(context.Context) ([]map[string]any, error) {
 	return []map[string]any{{"name": "hello", "type": "function", "appId": "wxfake"}}, nil
 }
@@ -786,7 +791,8 @@ func (r *recordingAppBridge) Call(_ context.Context, method string, params map[s
 func TestToolCallTrafficListAndBody(t *testing.T) {
 	messages := exchange(t, Deps{Traffic: fakeTraffic{}, Core: &fakeCore{}}, strings.Join([]string{
 		`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"traffic_list","arguments":{"apiType":"wx.request"}}}`,
-		`{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"traffic_get_body","arguments":{"id":"a1","part":"response"}}}`,
+		// redact:false：这条用例验证的是原文通道；默认打码的契约在 redaction 测试里。
+		`{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"traffic_get_body","arguments":{"id":"a1","part":"response","redact":false}}}`,
 	}, "\n")+"\n")
 
 	list := byID(messages, 1)
@@ -1530,8 +1536,10 @@ func TestHookStartStopRouteToTheCaptureIPC(t *testing.T) {
 			t.Fatalf("工具 %v 不该报错: %v", id, result["content"])
 		}
 	}
-	if len(bridge.calls) != 2 || bridge.calls[0] != "wxapi.start" || bridge.calls[1] != "cloud.stop" {
-		t.Fatalf("采集开关必须落到已注册的 IPC：%v", bridge.calls)
+	// hook_start 走 ensureHook：先探 feeder 统计再启动（已在跑且健康时是
+	// no-op，断线时 stop+start），路由仍全部落到桌面壳已注册的 IPC。
+	if len(bridge.calls) != 3 || bridge.calls[0] != "wxapi.stats" || bridge.calls[1] != "wxapi.start" || bridge.calls[2] != "cloud.stop" {
+		t.Fatalf("采集开关必须落到已注册的 IPC（开钩子先探统计再启动）：%v", bridge.calls)
 	}
 
 	// navigator 是控制类钩子（没有记录流）、console 连接即常开：两者都不该由 agent
@@ -1541,7 +1549,7 @@ func TestHookStartStopRouteToTheCaptureIPC(t *testing.T) {
 			t.Fatalf("工具 %v 必须拒绝不可采集的钩子: %v", id, result)
 		}
 	}
-	if len(bridge.calls) != 2 {
+	if len(bridge.calls) != 3 {
 		t.Fatalf("被拒的参数不得触达 IPC：%v", bridge.calls)
 	}
 }

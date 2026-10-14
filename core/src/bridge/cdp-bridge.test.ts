@@ -20,6 +20,28 @@ function respond(bridge: CdpBridge, clientId: number, commandId: number, result:
   }), clientId);
 }
 
+/** Feeds an error-envelope answer (what the WMPF shim sends for bad requests). */
+function respondError(bridge: CdpBridge, clientId: number, commandId: number, error: unknown): void {
+  bridge.receiveMiniapp(encodeCdpMessage({
+    sequence: 1,
+    category: "chromeDevtoolsResult",
+    operationId: commandId,
+    payload: JSON.stringify({ id: commandId, error }),
+    jsContextId: "",
+  }), clientId);
+}
+
+/** Feeds a CDP event (method + params) arriving from a miniapp connection. */
+function feedEvent(bridge: CdpBridge, clientId: number, event: Record<string, unknown>): void {
+  bridge.receiveMiniapp(encodeCdpMessage({
+    sequence: 1,
+    category: "chromeDevtoolsResult",
+    operationId: 0,
+    payload: JSON.stringify(event),
+    jsContextId: "",
+  }), clientId);
+}
+
 /** Reads the outbound CDP command payload of the last frame a peer received. */
 function lastPayload(sent: Array<Buffer | string>): Record<string, unknown> {
   const outbound = decodeCdpMessage(sent[sent.length - 1] as Buffer);
@@ -256,6 +278,53 @@ describe("CdpBridge", () => {
 
   it("rejects a command before any miniapp has connected", async () => {
     await expect(new CdpBridge().sendCommand("Runtime.enable", {}, 100)).rejects.toThrow("no miniapp connected");
+  });
+
+  it("rejects a pending command whose shim answer is an error envelope", async () => {
+    const bridge = new CdpBridge();
+    const miniapp = peer();
+    bridge.addMiniapp(miniapp.value);
+
+    const response = bridge.sendCommand("Runtime.evaluate", { expression: "1 + 1", contextId: 99 }, 1000);
+    const command = lastPayload(miniapp.sent);
+    respondError(bridge, 1, command.id as number, { code: -32000, message: "context not found" });
+
+    await expect(response).rejects.toThrow("context not found");
+  });
+
+  it("feeds the context registry from Runtime execution-context events", () => {
+    const bridge = new CdpBridge();
+    const miniapp = peer();
+    bridge.addMiniapp(miniapp.value);
+
+    feedEvent(bridge, 1, { method: "Runtime.executionContextCreated", params: { context: { id: 3, name: "appservice", origin: "https://servicewechat.com" } } });
+    feedEvent(bridge, 1, { method: "Runtime.executionContextCreated", params: { context: { id: 5, name: "page-frame", origin: "" } } });
+    expect(bridge.listContexts()).toEqual([
+      { id: 3, name: "appservice", origin: "https://servicewechat.com" },
+      { id: 5, name: "page-frame", origin: "" },
+    ]);
+
+    feedEvent(bridge, 1, { method: "Runtime.executionContextDestroyed", params: { executionContextId: 5 } });
+    expect(bridge.listContexts()).toHaveLength(1);
+
+    feedEvent(bridge, 1, { method: "Runtime.executionContextsCleared", params: {} });
+    expect(bridge.listContexts()).toHaveLength(0);
+  });
+
+  it("keeps per-connection context registries apart", () => {
+    const bridge = new CdpBridge();
+    const first = peer();
+    const second = peer();
+    bridge.addMiniapp(first.value);
+    bridge.addMiniapp(second.value);
+
+    feedEvent(bridge, 1, { method: "Runtime.executionContextCreated", params: { context: { id: 3, name: "a", origin: "" } } });
+    feedEvent(bridge, 2, { method: "Runtime.executionContextCreated", params: { context: { id: 9, name: "b", origin: "" } } });
+
+    // 锁在 1 号连接上：listContexts 只看活动目标。
+    expect(bridge.listContexts()).toEqual([{ id: 3, name: "a", origin: "" }]);
+    expect(bridge.switchMiniapp(2)).toBe(true);
+    expect(bridge.listContexts()).toEqual([{ id: 9, name: "b", origin: "" }]);
   });
 
   it("reports connection status for the miniapp and devtools peers", () => {

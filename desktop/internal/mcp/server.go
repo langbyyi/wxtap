@@ -35,8 +35,9 @@ type Deps struct {
 	AllowedCodeRoot string
 	// ToolProfile curates what tools/list advertises: "lean" (the default)
 	// lists the consolidated catalog; "all" lists every tool including the
-	// compat names kept callable for old clients. Dispatch is profile-independent —
-	// unadvertised names still answer tools/call.
+	// compat names kept callable for old clients. Only the advertised set is
+	// guaranteed: clients that pre-filter by tools/list never send names
+	// absent from it, so a tool meant to be callable must be advertised.
 	ToolProfile string
 	// Version is the version the MCP handshake reports. It is injected rather
 	// than hardcoded here: the shell's version already lives in
@@ -145,6 +146,9 @@ type Core interface {
 	HookDrain(ctx context.Context, name string, afterSeq int64, limit int, afterUpdateSeq int64, updateLimit int) (DrainPage, error)
 	HookClear(ctx context.Context, name string) error
 	CloudScan(ctx context.Context) ([]map[string]any, error)
+	// Contexts reads the event-fed execution-context registry of the active
+	// target; empty when the host shim emits no context events.
+	Contexts(ctx context.Context) ([]map[string]any, error)
 	CDPCommand(ctx context.Context, method string, params map[string]any, timeoutMs int) (map[string]any, error)
 	// DebugState is the debugger session snapshot (paused frames, parsed
 	// scripts); enable=true also flips on Debugger.enable in the Core.
@@ -201,6 +205,10 @@ var PassThroughTools = map[string]passThrough{
 	"miniapp_list":   {Method: "miniapp.list"},
 	"miniapp_switch": {Method: "miniapp.switch", Args: []string{"id"}, Required: []string{"id"}},
 	"targets_list":   {Method: "targets.list"},
+	// H5/web-view 目标的一次性验证：创建失败的原因（上下文未就绪、不是可调试
+	// 网页等）只有从这里能看到——miniapp_* 工具的回包不带 H5 通道的失败文案。
+	// clientId 是 Core 的连接号（miniapp_list 的 id），targetId 来自 targets_list。
+	"targets_probe": {Method: "targets.probe", Args: []string{"clientId", "targetId"}, Required: []string{"clientId", "targetId"}},
 
 	// 采集健康 / 驱动 / 验证。
 	"wxapi_replay": {Method: "wxapi.replay", Args: []string{"api_name", "options"}, Required: []string{"api_name"}},
@@ -363,11 +371,17 @@ type Server struct {
 	appServiceCtx int
 	pageCtx       int
 	pageCtxRoute  string
+
+	// installMu / installGen 记录 MCP 侧亲手启动过的采集钩子及其安装时的页面
+	// generation：session_start 与 hook_start 的幂等判定、capture_health 的
+	// 断线检测都靠它。只记本进程启动过的——GUI 侧的启停不由 MCP 背书。
+	installMu  sync.Mutex
+	installGen map[string]int64
 }
 
 // New wires an MCP server over the given providers.
 func New(deps Deps) *Server {
-	return &Server{deps: deps, scanSlots: make(chan struct{}, 1)}
+	return &Server{deps: deps, scanSlots: make(chan struct{}, 1), installGen: map[string]int64{}}
 }
 
 // Serve reads newline-delimited requests until EOF, writing one response line
@@ -451,7 +465,7 @@ Manual order for step-by-step execution — nothing is captured before the last 
 3. miniapp_list, then miniapp_switch if several mini programs are open.
 4. hook_start {name:"wxapi"} (and/or "cloud"): capture begins at that moment; hook_drain stays empty before it.
 
-Then: hook_drain (records + settled updates, cursor-paged; waitMs>0 waits for new records after a flow is triggered) and traffic_records / traffic_get_body for the stored side. Read capture health (session_status or hook_stats) before concluding anything about missing data — pageDropped* counters mean permanently lost records. UI: miniapp_screenshot / click / type / navigate, miniapp_evaluate, miniapp_console_log, miniapp_get_storage. JS debugging: debugger_list_scripts, debugger_breakpoint {action:set}, debugger_control {action:pause|resume|step_*}, debugger_inspect (frame scopes / expressions) while paused; miniapp_get_source for script text. Offline audit: extract_inventory, miniapp_decompile, miniapp_search_code, miniapp_scan_sensitive, ak_verify. Resources (skill://, wxtap://reference/*) and prompts (wx_* workflows) carry the full methodology; unadvertised compat tool names still answer tools/call.`
+Then: hook_drain (records + settled updates, cursor-paged; waitMs>0 waits for new records after a flow is triggered) and traffic_records / traffic_get_body for the stored side. Read capture health (session_status or hook_stats) before concluding anything about missing data — pageDropped* counters mean permanently lost records. UI: miniapp_screenshot / click / type / navigate, miniapp_evaluate, miniapp_console_log, miniapp_get_storage. JS debugging: debugger_list_scripts, debugger_breakpoint {action:set}, debugger_control {action:pause|resume|step_*}, debugger_inspect (frame scopes / expressions) while paused; miniapp_get_source for script text. Offline audit: extract_inventory, miniapp_decompile, miniapp_search_code, miniapp_scan_sensitive, ak_verify. Resources (skill://, wxtap://reference/*) and prompts (wx_* workflows) carry the full methodology. Only the tools tools/list advertises are guaranteed to be callable: clients that pre-filter by the listing never dispatch names absent from it.`
 
 func (s *Server) dispatch(req *request) *response {
 	switch req.Method {
@@ -546,15 +560,16 @@ func (s *Server) tools() []toolDef {
 				"page": integer, "limit": num, "query": str,
 				"apiType": str, "status": str, "appId": str,
 			})},
-		{Name: "traffic_get_body", Description: "Get the request or response body of one traffic record. Bodies over 256KB come back truncated (truncated:true, totalBytes) — narrow the query or use the GUI for the full text",
+		{Name: "traffic_get_body", Description: "Get the request or response body of one traffic record. Sensitive values (tokens, cookies, phone numbers, ID numbers) are masked by default — redact:false returns the raw stored body. Bodies over 256KB come back truncated (truncated:true, totalBytes) — narrow the query or use the GUI for the full text",
 			InputSchema: schema(map[string]any{
-				"id":   str,
-				"part": map[string]any{"type": "string", "enum": []string{"request", "response"}},
+				"id":     str,
+				"part":   map[string]any{"type": "string", "enum": []string{"request", "response"}},
+				"redact": boolean,
 			}, "id")},
-		{Name: "traffic_records", Description: "One aggregated history page (newest first): summaries with each record's request/response bodies inlined (truncated to bodyBytes; binary bodies reported as binary). bodyBytes:0 gives a body-free listing. For one full body use traffic_get_body",
+		{Name: "traffic_records", Description: "One aggregated history page (newest first): summaries with each record's request/response bodies inlined (truncated to bodyBytes; binary bodies reported as binary). Sensitive values are masked by default (redact:false for raw). bodyBytes:0 gives a body-free listing. For one full body use traffic_get_body",
 			InputSchema: schema(map[string]any{
 				"page": integer, "query": str, "apiType": str, "status": str, "appId": str,
-				"limit": num, "bodyBytes": num,
+				"limit": num, "bodyBytes": num, "redact": boolean,
 			})},
 		{Name: "traffic_appids", Description: "List the mini programs that have stored traffic: one row per appid with its record count, last capture time and a display name when one is known (learned from connected sessions or the decompiled output). This is how you pick the appId for traffic_list / traffic_records and the appid for asset_scan — do not guess appids",
 			InputSchema: schema(map[string]any{})},
@@ -570,36 +585,41 @@ func (s *Server) tools() []toolDef {
 			InputSchema: schema(map[string]any{
 				"name": map[string]any{"type": "string", "enum": []string{"wxapi", "cloud"}},
 			}, "name")},
-		{Name: "hook_drain", Description: "Read captured wxapi/cloud records after afterSeq (cursor-paged; nextSeq feeds back; default page 50 records, each with full bodies — keep paging the cursor instead of raising the limit) plus settled-record updates for async calls whose outcome landed after their record was drained — feed nextUpdateSeq back, otherwise the oldest batch is re-read on every call. waitMs>0 blocks server-side until a new record lands (or timeout) — use it after triggering a flow instead of polling. Empty until hook_start",
+		{Name: "hook_drain", Description: "Read captured wxapi/cloud records after afterSeq (cursor-paged; nextSeq feeds back; default page 50 records, each with full bodies — keep paging the cursor instead of raising the limit) plus settled-record updates for async calls whose outcome landed after their record was drained — feed nextUpdateSeq back, otherwise the oldest batch is re-read on every call. waitMs>0 blocks server-side until a new record lands (or timeout) — use it after triggering a flow instead of polling. Records are masked by default (tokens/cookies/phones/IDs) — redact:false for raw values. Empty until hook_start; a fresh hook_start also clears the page buffer, so afterSeq=0 reads only this capture window",
 			InputSchema: schema(map[string]any{
 				"name":     map[string]any{"type": "string", "enum": []string{"wxapi", "cloud"}},
 				"afterSeq": num, "limit": num,
-				"afterUpdateSeq": num, "updateLimit": num, "waitMs": num,
+				"afterUpdateSeq": num, "updateLimit": num, "waitMs": num, "redact": boolean,
 			}, "name")},
-		{Name: "hook_wait", Description: "Long-poll the wxapi/cloud record stream: block until at least one new record after afterSeq lands (or timeoutMs), then return that page — the mechanism for waiting out a triggered flow instead of polling hook_drain. Read-only on the update stream; cursor semantics match hook_drain (nextSeq feeds the next afterSeq)",
+		{Name: "hook_wait", Description: "Long-poll the wxapi/cloud record stream: block until at least one new record after afterSeq lands (or timeoutMs), then return that page — the mechanism for waiting out a triggered flow instead of polling hook_drain. Records are masked by default (redact:false for raw). Read-only on the update stream; cursor semantics match hook_drain (nextSeq feeds the next afterSeq)",
 			InputSchema: schema(map[string]any{
 				"name":     map[string]any{"type": "string", "enum": []string{"wxapi", "cloud"}},
-				"afterSeq": num, "limit": num, "timeoutMs": num,
+				"afterSeq": num, "limit": num, "timeoutMs": num, "redact": boolean,
 			}, "name")},
 		{Name: "scan_dir", Description: "Scan an unpacked wxapkg directory for sensitive information (credentials, IDs, URLs, OSS buckets). Findings are deduped by rule+value+file with the snippet windowed around the match and capped (total_findings/truncated report the rest) — the raw scanner report on a minified bundle is far too large to return. Large directories run as a background job: the first call accepts it and answers {async:true, task_id, status:'started'}; call again with the same arguments to poll (status:'running' carries files_done/files_total; status:'error' reports a failure once, the next call retries); an unchanged directory answers instantly with cached:true",
 			InputSchema: schema(map[string]any{"dir": str}, "dir")},
-		{Name: "miniapp_screenshot", Description: "Take a screenshot of the current miniapp page",
+		{Name: "miniapp_screenshot", Description: "Take a screenshot of the current miniapp page. A second text content block carries this capture's route/viewport/dpr — the capture targets the browser-level endpoint and can disagree with the page stack, so check it",
 			InputSchema: schema(map[string]any{"format": map[string]any{"type": "string", "enum": []string{"png", "jpeg"}}, "quality": integer})},
-		{Name: "miniapp_click", Description: "Click an element by CSS selector or coordinates. Coordinates are the page's CSS pixels (typically a 414x780 viewport) — NOT screenshot pixels: screenshots are scaled up by the device pixel ratio (~1.5x), so divide screenshot coords by (screenshot_width/viewport_width). A click outside the viewport is rejected with the viewport size instead of silently clicking nothing; a successful click returns the viewport it used. Selector clicks resolve in the current page webview and read a miss as an error",
-			InputSchema: schema(map[string]any{"selector": str, "x": num, "y": num})},
-		{Name: "miniapp_type", Description: "Type text into the focused or selected input",
+		{Name: "miniapp_click", Description: "Click an element: by a11y-tree node_path (\"0/2/1\" = body's first child's third child's second — dispatches exparser tap when the component bridge answers, falling back to a DOM click; the reply says which via it used), by CSS selector (current page webview; a miss reads as an error), or coordinates. Coordinates are the page's CSS pixels (typically a 414x780 viewport) — NOT screenshot pixels: screenshots are scaled up by the device pixel ratio (~1.5x), so divide screenshot coords by (screenshot_width/viewport_width). A click outside the viewport is rejected with the viewport size instead of silently clicking nothing; a successful click returns the viewport it used",
+			InputSchema: schema(map[string]any{"node_path": str, "selector": str, "x": num, "y": num})},
+		{Name: "miniapp_a11y_tree", Description: "Walk the current page webview's DOM as an accessibility tree: per node a stable path (feed it to miniapp_click {node_path}), tag, trimmed text and bounding rect. Experimental: capped at 300 nodes (truncated:true reports the rest); web-view overlays still belong to the host page DOM, so their content does not appear here",
+			InputSchema: schema(map[string]any{})},
+		{Name: "miniapp_type", Description: "Type text into the focused or selected input. A selector hitting a component input (wx-input) dispatches the component's input event — keyboard events do not change component values — and the reply carries the post-call value length (an empty value reads ok:false); non-component elements fall back to real keyboard events",
 			InputSchema: schema(map[string]any{"text": str, "selector": str, "clear": boolean}, "text")},
-		{Name: "miniapp_navigate", Description: "Navigate to a miniapp route. Tab-bar pages are auto-switched (the dispatch becomes switchTab semantics and the stack depth stays 1) — verify the landing with miniapp_page_stack, since ok reflects the dispatch, not the page's own load",
-			InputSchema: schema(map[string]any{"route": str, "method": map[string]any{"type": "string", "enum": []string{"navigateTo", "redirectTo", "reLaunch", "switchTab"}}}, "route")},
+		{Name: "miniapp_navigate", Description: "Navigate to a miniapp route (route required), or back with method navigateBack (+delta, default 1; route ignored). The reply is verified against the real page stack after the call: a dispatch whose callback said ok but left the stack unchanged answers ok:false with route_observed carrying what the stack actually shows. Tab-bar pages are auto-switched (switchTab semantics, stack depth stays 1). A foreground plugin page may refuse the appservice dispatch — navigateBack then retries inside the page webview",
+			InputSchema: schema(map[string]any{"route": str, "method": map[string]any{"type": "string", "enum": []string{"navigateTo", "redirectTo", "reLaunch", "switchTab", "navigateBack"}}, "delta": integer})},
 		{Name: "miniapp_get_routes", Description: "Get all registered miniapp routes", InputSchema: schema(map[string]any{})},
 		{Name: "miniapp_get_current_route", Description: "Get the current active route", InputSchema: schema(map[string]any{})},
 		{Name: "miniapp_scroll", Description: "Scroll the page or a selected element", InputSchema: schema(map[string]any{"x": num, "y": num, "selector": str})},
-		{Name: "miniapp_list_contexts", Description: "List JavaScript execution contexts", InputSchema: schema(map[string]any{})},
-		{Name: "miniapp_evaluate", Description: "Execute JavaScript in the miniapp. Results over 48KB come back truncated (truncated:true, total_bytes) — project the fields you need in the expression instead of fetching whole datasets",
+		{Name: "miniapp_call", Description: "Call the miniapp's own code in the appservice (page methods, store.dispatch, business helpers) — the path that carries the app's own request interceptor and login state, unlike a raw wx.request. The reply summarizes the result (types, lengths, key names; depth 4, 64 keys per object): field values — tokens included — never leave the miniapp. await_promise:true for async results",
+			InputSchema: schema(map[string]any{"expression": str, "await_promise": boolean}, "expression")},
+		{Name: "miniapp_list_contexts", Description: "List JavaScript execution contexts: id, kind (appservice|webview) and — for webviews — the route each one is showing (body[is]). Event-fed from the host when it reports context lifecycle, otherwise a bounded probe (source says which). Evaluating against an id that no longer exists is an error, not an empty result", InputSchema: schema(map[string]any{})},
+		{Name: "miniapp_evaluate", Description: "Execute JavaScript in the miniapp. Statement-level inputs are automatically wrapped in an IIFE when the host rejects them as SyntaxError — produce a value with an explicit return. Results over 48KB come back truncated (truncated:true, total_bytes) — project the fields you need in the expression instead of fetching whole datasets. An unknown context_id is an error, not an empty result",
 			InputSchema: schema(map[string]any{"expression": str, "await_promise": boolean, "context_id": integer}, "expression")},
-		{Name: "miniapp_console_log", Description: "Get recent miniapp console output", InputSchema: schema(map[string]any{"clear": boolean})},
+		{Name: "miniapp_console_log", Description: "Get recent miniapp console output. Sensitive values inside records are masked by default (redact:false for raw)", InputSchema: schema(map[string]any{"clear": boolean, "redact": boolean})},
 		{Name: "miniapp_get_info", Description: "Get miniapp metadata and routes", InputSchema: schema(map[string]any{})},
-		{Name: "miniapp_get_storage", Description: "Read miniapp local storage: all keys+values+size without arguments, or one key's value with key", InputSchema: schema(map[string]any{"key": str})},
+		{Name: "miniapp_get_storage", Description: "Read miniapp local storage: all keys+values+size without arguments, one key's value with key, or keys-only metadata with mode:\"keys\" ({keys, sizes, currentSize} — look before you read). Sensitive values (tokens, phone numbers, ID numbers) are masked by default; redact:false returns raw values",
+			InputSchema: schema(map[string]any{"key": str, "mode": map[string]any{"type": "string", "enum": []string{"full", "keys"}}, "redact": boolean})},
 		{Name: "miniapp_get_storage_key", Description: "Get one miniapp storage value", InputSchema: schema(map[string]any{"key": str}, "key")},
 		{Name: "miniapp_set_storage", Description: "Write one storage key (wx.setStorageSync) — the tamper primitive: overwrite a cached token/role/flag, re-trigger the flow and observe the result. value is any JSON value (string token, number, bool, object) and keeps its shape; page-side failures surface as errors",
 			InputSchema: schema(map[string]any{"key": str, "value": map[string]any{}}, "key", "value")},
@@ -607,7 +627,7 @@ func (s *Server) tools() []toolDef {
 			InputSchema: schema(map[string]any{"key": str, "all": boolean})},
 		{Name: "miniapp_clear_storage", Description: "Wipe all miniapp local storage (wx.clearStorageSync) — destructive and unrecoverable. The legacy name for miniapp_remove_storage {all:true}, the form the default catalogue advertises; kept callable for clients that hardcode it", InputSchema: schema(map[string]any{})},
 		{Name: "miniapp_call_cloud", Description: "Call a WeChat cloud function. Results over 48KB come back truncated (truncated:true, total_bytes) — project the fields you need instead of fetching the whole payload", InputSchema: schema(map[string]any{"name": str, "data": object}, "name")},
-		{Name: "miniapp_cloud_captures", Description: "Get cloud calls captured by the dynamic hook (empty until a capture is started with hook_start). Snapshot read capped at 200 records (truncated:true points to hook_drain cursor paging for the rest)", InputSchema: schema(map[string]any{"clear": boolean})},
+		{Name: "miniapp_cloud_captures", Description: "Get cloud calls captured by the dynamic hook (empty until a capture is started with hook_start). Snapshot read capped at 200 records (truncated:true points to hook_drain cursor paging for the rest). Sensitive values are masked by default (redact:false for raw)", InputSchema: schema(map[string]any{"clear": boolean, "redact": boolean})},
 		{Name: "miniapp_cloud_scan", Description: "Statically scan loaded code for cloud references", InputSchema: schema(map[string]any{})},
 		{Name: "miniapp_http_request", Description: "Send an HTTP request for backend testing",
 			InputSchema: schema(map[string]any{"method": str, "url": str, "headers": object, "body": str, "timeout": num}, "method", "url")},
@@ -624,8 +644,8 @@ func (s *Server) tools() []toolDef {
 		{Name: "miniapp_get_source", Description: "Get script source by script id or URL pattern", InputSchema: schema(map[string]any{"url_pattern": str, "max_length": integer}, "url_pattern")},
 		{Name: "navigator_page_stack", Description: "Get the connected miniapp's runtime page stack, bottom page first, with each page's query params. This is what is actually on the navigation stack (unlike miniapp_get_routes, the configured page list), so it is the authoritative answer for the current page and how far back navigateBack can go",
 			InputSchema: schema(map[string]any{})},
-		{Name: "miniapp_page_stack", Description: "One read covering every page-level view: the live navigation stack (bottom first), the configured page list, tab bar pages and the current route. The consolidated form of the separate page reads",
-			InputSchema: schema(map[string]any{})},
+		{Name: "miniapp_page_stack", Description: "One read covering every page-level view: the live navigation stack (bottom first), the configured page list, tab bar pages and the current route. Stack query values are masked by default (redact:false for raw) — session-type query parameters do not belong in a transcript. The consolidated form of the separate page reads",
+			InputSchema: schema(map[string]any{"redact": boolean})},
 		{Name: "sessionkey_scan_traffic", Description: "Extract session_key / iv / encryptedData material from the packets already captured (the traffic store), including URL-encoded bodies. Read-only",
 			InputSchema: schema(map[string]any{"limit": integer})},
 		{Name: "sessionkey_scan_decompiled", Description: "Extract session_key / iv / encryptedData material from the restored (decompiled) mini-program sources. Read-only",
@@ -646,6 +666,8 @@ func (s *Server) tools() []toolDef {
 			InputSchema: schema(map[string]any{"id": integer}, "id")},
 		{Name: "targets_list", Description: "List the CDP targets the Core can see. The authoritative view of what is attachable, unlike miniapp_list_contexts which probes heuristically. A non-empty error field alongside an empty list means the query failed, not that there is nothing there",
 			InputSchema: schema(map[string]any{})},
+		{Name: "targets_probe", Description: "Verify one H5/web-view target with a one-shot attach: opens a temporary session, reads the page info, releases it. This is the only place an H5 creation failure's reason is visible to agents (context not ready, not a debuggable page, ...) — the miniapp_* tools' replies never carry the H5 channel's failure text. clientId is the Core connection id from miniapp_list; targetId comes from targets_list",
+			InputSchema: schema(map[string]any{"clientId": integer, "targetId": str}, "clientId", "targetId")},
 
 		// 采集健康 / 驱动 / 验证。
 		{Name: "hook_stats", Description: "Read a capture hook's health: pending and dropped counters plus the feeder cursors. pageDroppedRecords / pageDroppedUpdates count records the in-page buffer evicted before anything read them — those are permanently lost, so a conclusion like 'the traffic holds no session_key' is only sound once they are zero. dropped is different: those records reached the UI and the store and remain readable through traffic_records",
@@ -767,9 +789,11 @@ func (s *Server) tools() []toolDef {
 }
 
 // catalog applies the advertisement profile. Lean (default) hides the tools a
-// merged form covers: the merged tool stays the one agents see, the old name
-// keeps answering tools/call for clients that hard-coded it. This is what
-// keeps the surface small without breaking the "keep serving" contract.
+// merged form covers: the merged tool stays the one agents see. Only the
+// advertised set is guaranteed — clients that pre-filter by tools/list never
+// send an unadvertised name, so a tool an agent must be able to call has to be
+// in leanCatalog; absorbed names remain dispatchable for clients that
+// hard-coded them.
 func (s *Server) catalog(defs []toolDef) []toolDef {
 	if s.deps.ToolProfile == "all" {
 		return defs
@@ -783,12 +807,20 @@ func (s *Server) catalog(defs []toolDef) []toolDef {
 	return lean
 }
 
-// leanCatalog is the consolidated advertisement set. Names absent from it are
-// still dispatchable — a merge never removes an entry point, it only stops
-// advertising the redundant shape of it.
+// leanCatalog is the consolidated advertisement set. A merge never removes an
+// entry point — names absent from it stay dispatchable for clients that
+// hard-coded them — but only what is advertised here is guaranteed: a client
+// that pre-filters by tools/list cannot call anything else.
 var leanCatalog = map[string]bool{
-	// 会话：两把钥匙。
+	// 会话：两把钥匙，加上手动路径的引导工具——客户端按 tools/list 预过滤，
+	// instructions 与 skills 教的每一步（node_status → wechat_status →
+	// engine_start → miniapp_list → miniapp_switch → hook_start）在瘦目录里
+	// 必须真实可见，否则手动路径第一步就撞 Tool not found。
 	"session_start": true, "session_status": true,
+	"node_status": true, "wechat_status": true,
+	"engine_start": true, "engine_status": true,
+	"miniapp_list": true, "miniapp_switch": true, "targets_list": true,
+	"targets_probe": true,
 	// 采集与流量。
 	"hook_start": true, "hook_stop": true, "hook_drain": true,
 	"traffic_records": true, "traffic_get_body": true, "scan_dir": true,
@@ -796,6 +828,8 @@ var leanCatalog = map[string]bool{
 	"miniapp_screenshot": true, "miniapp_click": true, "miniapp_type": true,
 	"miniapp_navigate": true, "miniapp_evaluate": true, "miniapp_console_log": true,
 	"miniapp_page_stack": true, "miniapp_get_source": true,
+	"miniapp_list_contexts": true, "miniapp_call": true,
+	"miniapp_a11y_tree": true,
 	// 存储。
 	"miniapp_get_storage": true, "miniapp_set_storage": true, "miniapp_remove_storage": true,
 	// 云与主动验证。
@@ -853,8 +887,9 @@ func (s *Server) callTool(req *request) *response {
 			return ok(req, toolError("traffic store unavailable"))
 		}
 		var args struct {
-			ID   string `json:"id"`
-			Part string `json:"part"`
+			ID     string `json:"id"`
+			Part   string `json:"part"`
+			Redact *bool  `json:"redact"`
 		}
 		_ = json.Unmarshal(params.Arguments, &args)
 		if args.ID == "" {
@@ -871,6 +906,12 @@ func (s *Server) callTool(req *request) *response {
 		if err != nil {
 			return ok(req, toolError(err.Error()))
 		}
+		// 默认打码：JSON 体走深走查、自由文本走身份规则；先打码后截断（截断
+		// 会把掩码劈开）。totalBytes 始终报库里的原始长度。
+		masked := args.Redact == nil || *args.Redact
+		if masked {
+			body, _ = redactBody(body)
+		}
 		// 大文体整体灌进 agent 上下文既烧 token 也可能超出客户端载荷上限；
 		// 截断并如实标注，完整内容让 GUI 或更窄的查询去取。
 		const bodyLimit = 256 << 10
@@ -879,10 +920,10 @@ func (s *Server) callTool(req *request) *response {
 			for i := 0; i < 4 && !utf8.ValidString(text); i++ {
 				text = text[:len(text)-1]
 			}
-			result = map[string]any{"part": args.Part, "body": text, "truncated": true, "totalBytes": len(body)}
+			result = map[string]any{"part": args.Part, "body": text, "truncated": true, "totalBytes": len(body), "redacted": masked}
 			break
 		}
-		result = map[string]any{"part": args.Part, "body": string(body), "truncated": false, "totalBytes": len(body)}
+		result = map[string]any{"part": args.Part, "body": string(body), "truncated": false, "totalBytes": len(body), "redacted": masked}
 	case "engine_status":
 		if s.deps.Core == nil {
 			return ok(req, toolError("core engine unavailable"))
@@ -901,14 +942,23 @@ func (s *Server) callTool(req *request) *response {
 		if args.Name != "wxapi" && args.Name != "cloud" {
 			return ok(req, toolError("name must be wxapi or cloud"))
 		}
-		verb := ".start"
-		if params.Name == "hook_stop" {
-			verb = ".stop"
+		if params.Name == "hook_start" {
+			// 开钩子走 ensureHook 而不是裸转发 wxapi.start：feeder 自认在跑时
+			// 那条 IPC 会短路成假成功——引擎重启后页内钩子已经没了，它照样回 ok。
+			started, err := s.ensureHook(ctx, args.Name, false)
+			if err != nil {
+				return ok(req, toolError(err.Error()))
+			}
+			result = started
+			break
 		}
-		result, err = s.appCall(ctx, args.Name+verb, map[string]any{})
+		result, err = s.appCall(ctx, args.Name+".stop", map[string]any{})
 		if err != nil {
 			return ok(req, toolError(err.Error()))
 		}
+		s.installMu.Lock()
+		delete(s.installGen, args.Name)
+		s.installMu.Unlock()
 	case "hook_drain":
 		if s.deps.Core == nil {
 			return ok(req, toolError("core engine unavailable"))
@@ -920,6 +970,7 @@ func (s *Server) callTool(req *request) *response {
 			AfterUpdateSeq int64  `json:"afterUpdateSeq"`
 			UpdateLimit    int    `json:"updateLimit"`
 			WaitMs         int    `json:"waitMs"`
+			Redact         *bool  `json:"redact"`
 		}
 		_ = json.Unmarshal(params.Arguments, &args)
 		// 与 hook_start/hook_wait 同一校验：schema 只是给客户端的提示，服务端
@@ -965,6 +1016,22 @@ func (s *Server) callTool(req *request) *response {
 		}
 		if page.Updates == nil {
 			page.Updates = []DrainedUpdate{}
+		}
+		// 默认打码：记录的 header（token/cookie）与体是 agent 上下文的直接输入，
+		// 实值落进 transcript 就拿不回来；redact:false 才出原值。游标不受影响。
+		if args.Redact == nil || *args.Redact {
+			for index := range page.Records {
+				if masked, ok := redactAny(page.Records[index].Record).(map[string]any); ok {
+					page.Records[index].Record = masked
+				}
+			}
+			for index := range page.Updates {
+				if masked, ok := redactAny(page.Updates[index].Update).(map[string]any); ok {
+					page.Updates[index].Update = masked
+				}
+			}
+			result = redactedPage{DrainPage: page, Redacted: true}
+			break
 		}
 		result = page
 	case "scan_dir":
@@ -1046,10 +1113,18 @@ func (s *Server) callTool(req *request) *response {
 		}
 	}
 
+	// 采集断线只在异常时浮出：会话类工具的回包被盖上 capture_health，agent
+	// 不必每步都回 session_status 才发现「声称在采其实没采」。健康时不戳。
+	if healthWatchedTools[params.Name] {
+		result = s.attachHealth(ctx, result)
+	}
+
 	if image, isImage := result.(imageResult); isImage {
-		return ok(req, map[string]any{
-			"content": []map[string]any{{"type": "image", "data": image.Data, "mimeType": image.MimeType}},
-		})
+		content := []map[string]any{{"type": "image", "data": image.Data, "mimeType": image.MimeType}}
+		if image.Note != "" {
+			content = append(content, map[string]any{"type": "text", "text": image.Note})
+		}
+		return ok(req, map[string]any{"content": content})
 	}
 	data, err := json.Marshal(result)
 	if err != nil {

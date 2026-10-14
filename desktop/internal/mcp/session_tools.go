@@ -82,21 +82,36 @@ func (s *Server) sessionStart(ctx context.Context, args map[string]any) (any, er
 		out["engine_error"] = engineError
 	}
 
+	lockedID := 0
+	for _, entry := range entries {
+		if objectMap(entry)["locked"] == true {
+			lockedID = entryID(objectMap(entry))
+			break
+		}
+	}
+	// target 与当前锁定一致时不再 switch：重跑 switch 会重置页面 generation 与
+	// feeder ack，等于把一个正在工作的会话拆了重来（实机观测 generation 97→1、
+	// 钩子断线就是这么来的）。只有真的换目标才 switch，并强制重装两个钩子——
+	// 换上的 realm 里没有本进程装的东西。
 	targetID := intArg(args, "target", 0)
+	forcedReinstall := false
 	switch {
 	case targetID > 0:
-		switched, err := s.appCall(ctx, "miniapp.switch", map[string]any{"id": targetID})
-		if err != nil {
-			out["ok"] = false
-			out["step"] = "miniapp_switch"
-			out["error"] = err.Error()
-			return out, nil
-		}
-		if objectMap(switched)["ok"] == false {
-			out["ok"] = false
-			out["step"] = "miniapp_switch"
-			out["error"] = fmt.Sprintf("unknown miniapp id %d (see available)", targetID)
-			return out, nil
+		if targetID != lockedID {
+			switched, err := s.appCall(ctx, "miniapp.switch", map[string]any{"id": targetID})
+			if err != nil {
+				out["ok"] = false
+				out["step"] = "miniapp_switch"
+				out["error"] = err.Error()
+				return out, nil
+			}
+			if objectMap(switched)["ok"] == false {
+				out["ok"] = false
+				out["step"] = "miniapp_switch"
+				out["error"] = fmt.Sprintf("unknown miniapp id %d (see available)", targetID)
+				return out, nil
+			}
+			forcedReinstall = true
 		}
 	case len(entries) == 1:
 		// 唯一连接：引擎默认就锁它，无需显式切换。
@@ -135,14 +150,14 @@ func (s *Server) sessionStart(ctx context.Context, args map[string]any) (any, er
 			out["error"] = fmt.Sprintf("hooks must contain only wxapi / cloud, got %q", hook)
 			return out, nil
 		}
-		result, err := s.appCall(ctx, hook+".start", map[string]any{})
+		started, err := s.ensureHook(ctx, hook, forcedReinstall)
 		if err != nil {
 			out["ok"] = false
 			out["step"] = "hook_start"
-			out["error"] = fmt.Sprintf("%s: %v", hook, err)
+			out["error"] = err.Error()
 			return out, nil
 		}
-		capture[hook] = objectMap(result)
+		capture[hook] = started
 	}
 	out["capture"] = capture
 
@@ -196,16 +211,20 @@ func (s *Server) assembleSnapshot(ctx context.Context, out map[string]any) (any,
 	}
 
 	// 采集健康：两个钩子的丢弃计数。结论可信度前提，随快照常驻。
-	stats := map[string]any{}
-	for _, hook := range []string{"wxapi", "cloud"} {
-		result, err := s.appCall(ctx, hook+".stats", map[string]any{})
-		if err != nil {
-			stats[hook] = map[string]any{"error": err.Error()}
-			continue
+	// session_start 已填过 capture（含 already 标注）时不覆盖——它记录的是
+	// 这次调用对钩子做了什么，比再读一次 stats 更有价值；丢弃计数走 session_status。
+	if _, has := out["capture"]; !has {
+		stats := map[string]any{}
+		for _, hook := range []string{"wxapi", "cloud"} {
+			result, err := s.appCall(ctx, hook+".stats", map[string]any{})
+			if err != nil {
+				stats[hook] = map[string]any{"error": err.Error()}
+				continue
+			}
+			stats[hook] = result
 		}
-		stats[hook] = result
+		out["capture"] = stats
 	}
-	out["capture"] = stats
 
 	if s.deps.Traffic != nil {
 		if store, err := s.appCall(ctx, "traffic.stats", map[string]any{}); err == nil {
@@ -217,4 +236,186 @@ func (s *Server) assembleSnapshot(ctx context.Context, out map[string]any) (any,
 		out["ok"] = true
 	}
 	return out, nil
+}
+
+// hookAuditObjects maps a record-hook name onto the page-side audit object the
+// injected script installs (core/src/app.ts HOOK_SURFACES). Keep in sync with
+// that table.
+var hookAuditObjects = map[string]string{"wxapi": "wxApiAudit", "cloud": "cloudAudit"}
+
+// entryID reads the numeric id of a miniapp.list entry (IPC JSON makes them
+// float64).
+func entryID(entry map[string]any) int {
+	id, _ := entry["id"].(float64)
+	return int(id)
+}
+
+// currentGeneration reads the page generation from the Core; a failed read is
+// 0, which only ever compares equal to another 0.
+func (s *Server) currentGeneration(ctx context.Context) int64 {
+	if s.deps.Core == nil {
+		return 0
+	}
+	status, err := s.deps.Core.Status(ctx)
+	if err != nil {
+		return 0
+	}
+	return status.Generation
+}
+
+// recordInstall pins when this process last (re)installed a hook: the current
+// page generation at that moment.
+func (s *Server) recordInstall(ctx context.Context, hook string) {
+	s.installMu.Lock()
+	s.installGen[hook] = s.currentGeneration(ctx)
+	s.installMu.Unlock()
+}
+
+// hookAlive probes the page side directly: the feeder claiming running says
+// nothing about whether the realm it installed into still exists — an engine
+// restart or a page rebuild silently takes the hook with it (observed live as
+// a wxapi hook that ran while recording nothing).
+func (s *Server) hookAlive(ctx context.Context, hook string) bool {
+	object, ok := hookAuditObjects[hook]
+	if !ok || s.deps.Core == nil {
+		return false
+	}
+	contextID, err := s.appServiceContextID(ctx)
+	if err != nil {
+		return false
+	}
+	answer, err := s.evaluateJSON(ctx,
+		`(function(){return typeof window.`+object+`==='undefined'?'no':'yes'})()`,
+		false, contextID, 3000)
+	return err == nil && answer == "yes"
+}
+
+// hookCurrent reports whether the running hook is the one this process
+// installed on the current realm. Generation alone cannot decide it: an engine
+// restart rebuilds the bridge and the generation counts from zero again, which
+// can collide with a stale install-time value — the page-side probe is the
+// backstop, not an optimization.
+func (s *Server) hookCurrent(ctx context.Context, hook string) bool {
+	s.installMu.Lock()
+	installGen, recorded := s.installGen[hook]
+	s.installMu.Unlock()
+	if !recorded || installGen != s.currentGeneration(ctx) {
+		return false
+	}
+	return s.hookAlive(ctx, hook)
+}
+
+// ensureHook brings one capture hook to "running and installed on the current
+// realm". Three states: not running → start; running but stale (generation
+// moved, page-side object gone, or an explicit target switch forced a fresh
+// realm) → stop + start; running and healthy → no-op with already:true. A
+// fresh start also clears the page-side record buffer, so hook_drain's
+// afterSeq=0 reads only this capture window — a stale cursor can no longer
+// replay days-old records with full bodies. A healthy already-running hook is
+// left untouched: the GUI may share that page buffer.
+func (s *Server) ensureHook(ctx context.Context, hook string, forced bool) (map[string]any, error) {
+	stats, err := s.appCall(ctx, hook+".stats", map[string]any{})
+	running := err == nil && objectMap(stats)["running"] == true
+	if running && !forced && s.hookCurrent(ctx, hook) {
+		out := objectMap(stats)
+		out["already"] = true
+		return out, nil
+	}
+	if running {
+		if _, err := s.appCall(ctx, hook+".stop", map[string]any{}); err != nil {
+			return nil, fmt.Errorf("%s: %v", hook, err)
+		}
+	}
+	result, err := s.appCall(ctx, hook+".start", map[string]any{})
+	if err != nil {
+		return nil, fmt.Errorf("%s: %v", hook, err)
+	}
+	if s.deps.Core != nil {
+		_ = s.deps.Core.HookClear(ctx, hook)
+	}
+	s.recordInstall(ctx, hook)
+	out := objectMap(result)
+	if out == nil {
+		out = map[string]any{}
+	}
+	return out, nil
+}
+
+// captureHealth exposes the quiet-failure signature: a hook this process
+// started that is no longer running, or one whose realm moved without a
+// reinstall. Generation moved but the page-side object answers → autoInject
+// got there first; refresh the bookkeeping instead of crying wolf. nil means
+// nothing to report (nothing watched, or everything healthy).
+func (s *Server) captureHealth(ctx context.Context) map[string]any {
+	s.installMu.Lock()
+	watched := len(s.installGen) > 0
+	watches := map[string]bool{}
+	for hook := range s.installGen {
+		watches[hook] = true
+	}
+	s.installMu.Unlock()
+	if !watched || s.deps.AppBridge == nil {
+		return nil
+	}
+	curGen := s.currentGeneration(ctx)
+	hooks := map[string]any{}
+	abnormal := false
+	for _, hook := range []string{"wxapi", "cloud"} {
+		if !watches[hook] {
+			continue
+		}
+		stats, err := s.appCall(ctx, hook+".stats", map[string]any{})
+		running := err == nil && objectMap(stats)["running"] == true
+		entry := map[string]any{"running": running}
+		switch {
+		case !running:
+			abnormal = true
+		default:
+			s.installMu.Lock()
+			installGen := s.installGen[hook]
+			s.installMu.Unlock()
+			if installGen != curGen {
+				if s.hookAlive(ctx, hook) {
+					s.recordInstall(ctx, hook)
+				} else {
+					abnormal = true
+					entry["reason"] = "realm rebuilt without reinstall (page-side hook missing)"
+				}
+			}
+		}
+		hooks[hook] = entry
+	}
+	if !abnormal {
+		return nil
+	}
+	return map[string]any{"generation": curGen, "hooks": hooks}
+}
+
+// attachHealth stamps capture_health onto a map-shaped tool result when there
+// is something to report. Healthy sessions stay unstamped — the full picture
+// lives in session_status, and stamping every UI reply would be pure overhead.
+// Non-map results (the screenshot image) carry no stamp.
+func (s *Server) attachHealth(ctx context.Context, result any) any {
+	health := s.captureHealth(ctx)
+	if health == nil {
+		return result
+	}
+	if m, ok := result.(map[string]any); ok {
+		m["capture_health"] = health
+	}
+	return result
+}
+
+// healthWatchedTools are the session-adjacent tools whose replies get the
+// capture_health stamp when capture is broken: the UI/runtime/storage readers
+// an agent leans on mid-session, plus the drain readers. A stamp here means
+// "the capture you started is no longer recording — re-run session_start".
+var healthWatchedTools = map[string]bool{
+	"miniapp_click": true, "miniapp_type": true, "miniapp_navigate": true,
+	"miniapp_evaluate": true, "miniapp_console_log": true, "miniapp_page_stack": true,
+	"miniapp_scroll": true, "miniapp_get_storage": true, "miniapp_get_storage_key": true,
+	"miniapp_set_storage": true, "miniapp_remove_storage": true, "miniapp_clear_storage": true,
+	"miniapp_cloud_captures": true, "navigator_page_stack": true,
+	"miniapp_call": true,
+	"hook_drain":   true, "hook_wait": true,
 }

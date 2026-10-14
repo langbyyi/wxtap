@@ -82,6 +82,8 @@ export class CoreApp {
         return this.sendCdpCommand(request.params);
       case "cdp.debug":
         return this.debugState(request.params);
+      case "cdp.contexts":
+        return { contexts: this.bridgeOptional()?.listContexts() ?? [] };
       case "cdp.targets":
         return this.bridge().listTargets();
       case "cdp.h5Sessions":

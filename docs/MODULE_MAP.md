@@ -39,7 +39,7 @@ GUI 方法仍按域命名，已注册的前缀：`engine.*`、`debugger.*`、`mi
 
 | 模块 | 职责 |
 | --- | --- |
-| `desktop/internal/extract` | wxapkg 解密/解包、结构化敏感信息发现（内存态，页面展示） |
+| `desktop/internal/extract` | wxapkg 解密/解包、结构化敏感信息发现（内存态，页面展示）；反编译完成生成 `page-index.json`（页面路径 → wxml/wxss/js/json + 主包/子包/插件归属，`pageindex.go`） | |
 | `desktop/internal/api/ipc`（extract/code handlers） | 与前端约定的路径参数、进度事件、代码浏览器 |
 
 ## 前端（生产）
@@ -52,12 +52,14 @@ GUI 方法仍按域命名，已注册的前缀：`engine.*`、`debugger.*`、`mi
 
 ## MCP 工具面（生产）
 
-工具清单以 `internal/mcp/server.go` 的 `tools()` 为唯一事实来源（文档不再写死数量：每新增一个工具都要同步三处数字，必然会产生漂移）。`tools/list` 默认广播 lean 合并目录；被合并吸收的旧名字仍可调用（dispatch 与广播分离），`-tools=all` / `mcp.start {tools:"all"}` 恢复全量广播。工具分四类：
+工具清单以 `internal/mcp/server.go` 的 `tools()` 为唯一事实来源（文档不再写死数量：每新增一个工具都要同步三处数字，必然会产生漂移）。`tools/list` 默认广播 lean 合并目录；**只有目录里广播的名字保证可被客户端调用**——客户端按 `tools/list` 预过滤，目录外的名字在请求发出前即被拒。被合并吸收的旧名字保持可 dispatch（`tools/call` 不回 unknown tool）是给硬编码旧名的旧客户端留的兼容，不是可用性承诺，`-tools=all` / `mcp.start {tools:"all"}` 恢复全量广播。工具分四类（会话生命周期记账与动态面打码是横切`mcp.Server` 的两块基础设施，见第 4 条后的补充段）：
 
 1. **`miniapp_*` 直连工具**：走 Core 的 CDP 直连，命名与实现保持不变；这份冻结面的名字记在 `desktop/testdata/compat-surface.json`，由 `TestCompatMcpToolsStayExposed` 锁定。
 2. **直通工具（`PassThroughTools`）**：把 agent 的调用转成一条已注册的 GUI IPC 方法，agent 与 GUI 看到同一份实现。表里每条声明 `Method`，**需要入参的条目再声明入参白名单 `Args`**（外加 `Required`；无参的读工具不声明）。白名单是必需的：`AppBridge.Call` 能到达每一个已注册方法，一个无界转发就等于把整个 router 交给 agent（含 `extract.delete`、`config.save`）。**不要新增「调用任意 IPC 方法」的通用工具。**
 3. **一工具落多方法（`SelectorTools`）**：`hook_stats`、`navigator_guard`、`navigator_visit`、`sessionkey_scan` 四个——按选择子（`name` / `action` / `source`）在**数据表**里映射到具体方法，非法选择子当场拒绝、不触达 IPC。表刻意放在 `server.go` 的 `SelectorTools` 而不是 dispatcher 里的 `switch`：契约测试要拿真 router 逐条解析每个目标，埋在 switch 里的映射会让改名后的方法以「unsupported backend method」到达 agent 而无人能够拦截。
-4. **`debugger_*` 工具族（`debug_tools.go`）**：DevTools 暂停会话。CDP 事件（`Debugger.paused` / `scriptParsed`）由 Core 在 CDP 层捕获（`core/src/bridge/cdp-bridge.ts`），经 `cdp.debug` RPC 供工具读快照；pause / step 返回前轮询快照等事件落地。
+4. **`debugger_*` 工具族（`debug_tools.go`）**：DevTools 暂停会话。CDP 事件（`Debugger.paused` / `scriptParsed`）由 Core 在 CDP 层捕获（`core/src/bridge/cdp-bridge.ts`），经 `cdp.debug` RPC 供工具读快照；pause / step 返回前轮询快照等事件落地。`cdp-bridge.ts` 同时维护连接级的 `Runtime.executionContext*` 事件注册表（`cdp.contexts` RPC），`miniapp_list_contexts` 事件可用时零探测，不可用回退有界探测。Core 桥对 WMPF 回的 `{id, error}` 信封 reject（不再假成功），Go 侧 `evaluateDetail` 另有兜底检查与 SyntaxError 自动 IIFE 重试。
+
+会话生命周期记账在 `mcp.Server`（`session_tools.go`）：`installGen` 记录 MCP 侧启动过的钩子及其安装时 generation，`ensureHook` 三态判定（未跑启动 / 断线重装 / 健康跳过），`captureHealth` 在采集断线时把 `capture_health` 盖到会话类工具回包上（健康不戳）。MCP 动态面默认打码在 `redact.go`：`redactAny`（键名规则 + 身份形状正则，深度/节点上限）与 `redactCurl` / `redactBody`，各读面 `redact:false` 出原值，只作用于 agent 回包、不触 GUI 与实际重放报文。
 
 采集开关 `hook_start` / `hook_stop` 只是把 `wxapi.*` / `cloud.*` 暴露给 agent（记录流仍由 `hook_drain` 读）—— 连接小程序本身不采集，所以 agent 必须先显式开启采集，才有内容可供 drain。
 

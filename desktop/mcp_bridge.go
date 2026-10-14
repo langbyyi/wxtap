@@ -115,6 +115,10 @@ func (c *mcpCore) CloudScan(ctx context.Context) ([]map[string]any, error) {
 	return c.client.CloudScan(ctx)
 }
 
+func (c *mcpCore) Contexts(ctx context.Context) ([]map[string]any, error) {
+	return c.client.Contexts(ctx)
+}
+
 func (c *mcpCore) CDPCommand(ctx context.Context, method string, params map[string]any, timeoutMs int) (map[string]any, error) {
 	return c.client.CDPCommand(ctx, method, params, timeoutMs)
 }
@@ -224,6 +228,14 @@ func (c *appMCPCore) CloudScan(ctx context.Context) ([]map[string]any, error) {
 		return nil, err
 	}
 	return client.CloudScan(ctx)
+}
+
+func (c *appMCPCore) Contexts(ctx context.Context) ([]map[string]any, error) {
+	client, err := c.bridge.Engine()
+	if err != nil {
+		return nil, err
+	}
+	return client.Contexts(ctx)
 }
 
 func (c *appMCPCore) CDPCommand(ctx context.Context, method string, params map[string]any, timeoutMs int) (map[string]any, error) {

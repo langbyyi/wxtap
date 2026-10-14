@@ -3,6 +3,7 @@ package mcp
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"strings"
 	"testing"
 )
@@ -32,6 +33,16 @@ type recordingCore struct {
 	// success — the {error} shape a page-side try/catch returns.
 	errorPayload  string
 	payloadMarker string
+	// errorEnvelope answers every Runtime.evaluate with a CDP error envelope —
+	// the {error:{message}} shape the WMPF shim sends for a bad contextId.
+	errorEnvelope string
+	// syntaxFailures makes the next N Runtime.evaluate calls answer a
+	// SyntaxError exceptionDetails, the way statement-level inputs fail under
+	// WMPF's expression-position compilation.
+	syntaxFailures int
+	// evaluateTimeout makes Runtime.evaluate fail with the Core bridge's
+	// timeout error.
+	evaluateTimeout bool
 }
 
 func (c *recordingCore) CDPCommand(_ context.Context, method string, params map[string]any, _ int) (map[string]any, error) {
@@ -42,6 +53,16 @@ func (c *recordingCore) CDPCommand(_ context.Context, method string, params map[
 	if method == "Runtime.evaluate" {
 		c.lastExpr, _ = params["expression"].(string)
 		c.expressions = append(c.expressions, c.lastExpr)
+		if c.errorEnvelope != "" {
+			return map[string]any{"error": map[string]any{"message": c.errorEnvelope}}, nil
+		}
+		if c.evaluateTimeout {
+			return nil, errors.New("CDP command timed out: Runtime.evaluate")
+		}
+		if c.syntaxFailures > 0 {
+			c.syntaxFailures--
+			return map[string]any{"result": map[string]any{"exceptionDetails": map[string]any{"exception": map[string]any{"description": "SyntaxError: Unexpected token ';'"}}}}, nil
+		}
 		if raw, present := params["contextId"]; present {
 			c.contextCalls = append(c.contextCalls, contextCall{ID: probeContextID(raw), Expr: c.lastExpr})
 			if c.pageMisses > 0 && strings.Contains(c.lastExpr, probePageMarker) {
@@ -115,7 +136,7 @@ func TestHookWaitRejectsNonRecordHooks(t *testing.T) {
 
 func TestTrafficRecordsAggregatesBodies(t *testing.T) {
 	messages := exchange(t, Deps{Traffic: fakeTraffic{}}, strings.Join([]string{
-		`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"traffic_records","arguments":{"apiType":"wx.request"}}}`,
+		`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"traffic_records","arguments":{"apiType":"wx.request","redact":false}}}`,
 		`{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"traffic_records","arguments":{"apiType":"wx.request","bodyBytes":0}}}`,
 	}, "\n")+"\n")
 

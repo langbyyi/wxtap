@@ -4,7 +4,7 @@ WxTap 将自身的调试能力作为 MCP（Model Context Protocol）服务器暴
 
 ## 工具分档
 
-`tools/list` 缺省广播 **lean 目录**：合并形态的高杠杆工具。被合并吸收的旧名称仍可继续调用（`tools/call` 不返回 unknown tool），仅不再广播——硬编码旧名称的客户端不受影响，agent 的上下文中也不再出现冗余形态。需要完整清单时：stdio 加 `-tools=all`，HTTP 模式使用 `mcp.start {tools:"all"}`。本文不列出两道清单的条目数：唯一事实来源是 `desktop/internal/mcp/server.go` 中的 `tools()` 与 `leanCatalog`，`tools/list` 的返回同样可直接读取。
+`tools/list` 缺省广播 **lean 目录**：合并形态的高杠杆工具。**只有目录里广播的名字保证可被客户端调用**——客户端按 `tools/list` 预过滤，目录外的名字在请求发出前就会回 `Tool not found`；被合并吸收的旧名称保持可 dispatch（`tools/call` 不返回 unknown tool）是给硬编码旧名字的旧客户端留的兼容，不构成对 agent 的可用性承诺。需要完整清单时：stdio 加 `-tools=all`，HTTP 模式使用 `mcp.start {tools:"all"}`。本文不列出两道清单的条目数：唯一事实来源是 `desktop/internal/mcp/server.go` 中的 `tools()` 与 `leanCatalog`，`tools/list` 的返回同样可直接读取。
 
 ## 传输
 
@@ -43,11 +43,11 @@ stdio（无需打开 GUI，由客户端拉起进程）：
 
 stdio 模式由 MCP 客户端持有标准输入与输出，收到协议请求才返回 JSON，标准输入结束后退出。直接在 PowerShell 执行 `WxTap.exe -mcp` 可能立即返回提示符，且没有启动提示；这不足以判断是否正常，应以客户端的 `initialize` 回执确认连接。使用 `http://127.0.0.1:9527/mcp` 接入时，需要在 GUI 的「MCP 服务」页启动 HTTP 服务。
 
-在线调试前仍需人工登录微信并先打开小程序，使宿主进程存在。`engine_status.frida` 只表示附加状态，`miniapp` 表示小程序通道，`devtools` 表示外部 DevTools 客户端连接；使用 MCP 不要求先打开独立 DevTools 窗口。GUI 的暂停策略与 H5 会话管理目前没有独立 MCP 工具；不要把 `cdp_command` 当作 H5 通道，它禁止 Target 域，也不接受指定 H5 会话。
+在线调试前仍需人工登录微信并先打开小程序，使宿主进程存在。`engine_status.frida` 只表示附加状态，`miniapp` 表示小程序通道，`devtools` 表示外部 DevTools 客户端连接；使用 MCP 不要求先打开独立 DevTools 窗口。GUI 的暂停策略与 H5 会话管理目前没有独立 MCP 工具；不要把 `cdp_command` 当作 H5 通道，它禁止 Target 域，也不接受指定 H5 会话。H5 目标的一次性验证走 `targets_probe {clientId, targetId}`——H5 创建失败的原因（上下文未就绪、不是可调试网页等）只有从这里能看到。
 
 ## initialize 与引导
 
-`initialize` 返回的 `instructions` 把引导写成两条路径：**快路径**是 `session_start` 一次调用走完（前置检查 → `engine_start` → 选目标 → 开采集，中途受阻时报出受阻于哪一步）——它在引擎与采集两段上幂等（已在运行则提前返回），**指定 `target` 时并非「什么都不做」**：会重跑 `miniapp.switch`，重置页面 generation 与两个 feeder 的 ack（切换后的小程序拥有自己的页内序号空间）。重复调用仍是幂等的：重读的帧被 shell 的去重 FIFO 抑制，面板又按 `rid` 原地覆写，同一批记录不会出现两次。`session_status` 给出同一份状态快照，但不带 `session_start` 的 `available` 字段（哪些目标可选），是近似等价而非同一份返回。**手动路径**是逐步执行 `node_status` → `wechat_status` → `engine_start` → `miniapp_list` → `miniapp_switch` → `hook_start`，最后一步成功之前无法采集到任何记录。agent 无需额外文档即可据此完成引导，各步骤的失败归因与验证见 `resources/skills/session.md`。
+`initialize` 返回的 `instructions` 把引导写成两条路径：**快路径**是 `session_start` 一次调用走完（前置检查 → `engine_start` → 选目标 → 开采集，中途受阻时报出受阻于哪一步）——它是状态感知的幂等：引擎已附加则不再重建；**`target` 与当前锁定一致时不再重跑 switch**（重复 switch 会重置页面 generation 与 feeder ack，等于拆掉正在工作的会话）；只有真的换目标才切换并强制重装钩子。钩子按三态判定：没在跑 → 启动；在跑但断线（引擎重启、切页重建让页内钩子消失）→ 停止再启动；健康 → 跳过（回包标 `already:true`）。新启动会清一次页内记录缓冲：`hook_drain` 的 `afterSeq=0` 从本次启动起算，旧 cursor 不会回放跨天历史。`session_status` 给出同一份状态快照，但不带 `session_start` 的 `available` 字段（哪些目标可选），是近似等价而非同一份返回。**手动路径**是逐步执行 `node_status` → `wechat_status` → `engine_start` → `miniapp_list` → `miniapp_switch` → `hook_start`，最后一步成功之前无法采集到任何记录。agent 无需额外文档即可据此完成引导，各步骤的失败归因与验证见 `resources/skills/session.md`。
 
 ## 能力面
 
@@ -55,19 +55,23 @@ stdio 模式由 MCP 客户端持有标准输入与输出，收到协议请求才
 
 | 工具族 | 代表工具（lean） | 说明 |
 | --- | --- | --- |
-| 会话 | `session_start` `session_status` | 单次调用完成引导（前置检查 → engine_start → 选目标 → 开采集，失败按步骤归因）；单次调用取得全量状态快照 |
-| 采集 | `hook_start/stop` `hook_drain`（`waitMs` 长轮询） `traffic_records` `traffic_get_body` `scan_dir` | 采集需显式启动；记录流与落定更新流使用独立游标；单页聚合摘要与截断正文；丢弃计数是结论可信度的前提 |
-| UI / 运行时 | `miniapp_screenshot/click/type/navigate` `miniapp_evaluate` `miniapp_console_log` `miniapp_page_stack` `miniapp_get_source` | 不打断运行时的观测与驱动；`miniapp_page_stack` 单次返回导航栈、配置页面列表与当前路由 |
-| 存储 | `miniapp_get_storage`（`key` 可选） `miniapp_set_storage` `miniapp_remove_storage`（`all:true` 全量清空） | 授权测试的篡改入口 |
+| 会话 | `session_start` `session_status` `node_status` `wechat_status` `engine_start` `engine_status` `miniapp_list` `miniapp_switch` `targets_list` `targets_probe` | 单次调用完成引导（前置检查 → engine_start → 选目标 → 开采集，失败按步骤归因；状态感知幂等，同 target 不重切，断线钩子自愈）；手动引导路径的全部工具都在目录内，逐步归因可行；单次调用取得全量状态快照；`targets_probe` 是 H5 创建失败原因的唯一可见出口 |
+| 采集 | `hook_start/stop` `hook_drain`（`waitMs` 长轮询） `traffic_records` `traffic_get_body` `scan_dir` | 采集需显式启动；新启动清一次页内缓冲，`afterSeq:0` 只覆盖本次采集窗口；记录流与落定更新流使用独立游标；单页聚合摘要与截断正文；丢弃计数是结论可信度的前提 |
+| UI / 运行时 | `miniapp_screenshot/click/type/navigate` `miniapp_evaluate` `miniapp_call` `miniapp_a11y_tree` `miniapp_console_log` `miniapp_page_stack` `miniapp_list_contexts` `miniapp_get_source` | 不打断运行时的观测与驱动。`navigate` 以调用后的真实页面栈核验（假 ok 回 `ok:false` + `route_observed`，支持 `navigateBack`）；`click` 支持 a11y 树路径（exparser tap）；`type` 对组件输入走组件 input 事件并回值长度；`miniapp_call` 在 appservice 调用小程序自身代码、回包只回形状摘要（令牌不出小程序）；截图回包附路由 / 视口 / DPR |
+| 存储 | `miniapp_get_storage`（`key` / `mode:"keys"` 可选） `miniapp_set_storage` `miniapp_remove_storage`（`all:true` 全量清空） | 授权测试的篡改入口；`mode:"keys"` 只回键名与体长 |
 | 调试器 | `debugger_state` `debugger_control`（pause/resume/step_*） `debugger_breakpoint`（set/remove/list） `debugger_list_scripts` `debugger_inspect`（作用域 / 帧上求值） `cdp_command` | DevTools 暂停会话；`cdp_command` 为受域白名单管控的原始 CDP 通道（响应超 2MB 截断）。暂停期间整个小程序被冻结 |
 | 导航审计 | `navigator_guard` `navigator_visit`（start/state/stop） `navigator_blocked_redirects` | 守卫法检测未授权页面 |
 | 代码 / 凭据 | `extract_inventory` `miniapp_decompile` `code_projects` `code_list_dir` `miniapp_search_code` `miniapp_read_file` `miniapp_scan_sensitive` `ak_verify` `sessionkey_scan`（四路合一） `hook_list` `hook_inject` | 离线审计闭环；`ak_verify` 验证凭据活性（凭据无效属正常结果，而非错误） |
 | 云 / 重放 | `miniapp_cloud_captures` `miniapp_cloud_scan` `wxapi_replay` `miniapp_http_request` | 主动验证假设；`wxapi_replay` 的 `ok` 已在接口边界归一化（调用失败即 `ok:false`），`status` 取值为 `success` / `fail` / `complete`；云函数直呼使用 `miniapp_evaluate` 调用 `wx.cloud.callFunction`（`await_promise:true`） |
 | 工程树 / 官方端点 | `code_tree` `wxopen_endpoints` `wxopen_call` | `code_tree` 单次返回反编译工程的顶层结构与根路径；wxopen 两项列出官方端点清单并按次携带凭据探测（配合 `ak_verify` 完成验活链路，凭据不落盘） |
 | 资产清单 | `asset_scan` `asset_list` `asset_export` | 从反编译代码、最近 500 条流量与云函数名三类来源构建接口资产清单（`asset_scan` 异步受理，`asset_list` 分页读取）；`asset_export` 按 nuclei/httpx/json/txt/csv 直接回传 content（超 64KB 截断并标注 `totalBytes`），不弹保存对话框 |
-| 流量单条 | `traffic_curl` `traffic_replay` | `traffic_curl` 把最近 500 条里的一条捕获记录渲染成 bash/cmd 两种 curl 命令行（保持捕获时的原始头大小写，体走 `--data-raw`），给 Repeater/脚本重放做起点；`traffic_replay` 按捕获原文对真实后端重放一次（openWorld，走 replayUpstreamProxy，响应体 ≤4KB 截断），与 `wxapi_replay` 的分工：那个在页内以小程序环境重放 wx 调用，这个在进程内验证「服务端认不认这份头」。记录不在窗口内回 `记录不存在`。`traffic.exportHar` 走原生保存对话框，不接入 MCP |
+| 流量单条 | `traffic_curl` `traffic_replay` | `traffic_curl` 把最近 500 条里的一条捕获记录渲染成 bash/cmd 两种 curl 命令行（保持捕获时的原始头大小写，体走 `--data-raw`；敏感头的值与体里的身份证/手机号默认打码），给 Repeater/脚本重放做起点；`traffic_replay` 按捕获原文对真实后端重放一次（实际发出的报文不打码，回给 agent 的响应体默认打码；openWorld，走 replayUpstreamProxy，响应体 ≤4KB 截断），与 `wxapi_replay` 的分工：那个在页内以小程序环境重放 wx 调用，这个在进程内验证「服务端认不认这份头」。记录不在窗口内回 `记录不存在`。`traffic.exportHar` 走原生保存对话框，不接入 MCP |
 
 每个工具带 **annotations**（`readOnlyHint` / `destructiveHint` / `idempotentHint` / `openWorldHint`），agent 据此规划调用并判断安全边界。
+
+### 脱敏
+
+动态读面（`hook_drain` / `hook_wait` / `miniapp_cloud_captures` / `traffic_records` / `traffic_get_body` / `traffic_curl` / `traffic_replay` / `miniapp_get_storage`（含旧名 `miniapp_get_storage_key`）/ `miniapp_console_log` / `miniapp_page_stack`）**默认打码**，`redact:false` 才出原值，回包以 `redacted` 字段如实标注。规则：键名命中敏感表（token / cookie / auth / session / ticket / openid / unionid / phone / mobile / idcard / password / secret / credential 等）即掩值——字符串保留头尾形状、容器只报形状，键名与结构保留；键名未命中时按值形状兜底（11 位手机号、18 位证件号）。打码只在 MCP 边界做：GUI 与实际重放报文保持捕获原文。`miniapp_call` 的摘要形态天然不带实值，无 `redact` 参数。
 
 刻意排除在暴露面之外的 IPC 方法（删除类、自由配置、消费语义的 poll 等）不在工具表中，见 `docs/MODULE_MAP.md` 的排除清单。
 
@@ -87,7 +91,7 @@ stdio 模式由 MCP 客户端持有标准输入与输出，收到协议请求才
 
 | 层 | 位置 |
 | --- | --- |
-| MCP 服务器（stdio + HTTP） | `desktop/internal/mcp/`（`server.go` 工具表、`debug_tools.go` 调试器、`traffic_tools.go` 长轮询与聚合、`audit_tools.go` 资产清单与流量单条助手、`cdp_command.go` 逃生舱、`http.go` Streamable HTTP、`sse.go` legacy SSE、`resources.go` 与 `reference.go`、`prompts.go`） |
+| MCP 服务器（stdio + HTTP） | `desktop/internal/mcp/`（`server.go` 工具表、`session_tools.go` 会话编排与采集健康、`redact.go` 动态面打码、`debug_tools.go` 调试器、`traffic_tools.go` 长轮询与聚合、`audit_tools.go` 资产清单与流量单条助手、`cdp_command.go` 逃生舱、`http.go` Streamable HTTP、`sse.go` legacy SSE、`resources.go` 与 `reference.go`、`prompts.go`） |
 | GUI 内启动与状态 | `desktop/ipc_bridge.go` 的 `mcp.start` / `mcp.status` / `mcp.stop`；前端 `desktop/frontend/src/views/McpView.vue` |
 | Core 侧调试事件捕获 | `core/src/bridge/cdp-bridge.ts`（`Debugger.paused` / `scriptParsed` 环形缓冲）经 `cdp.debug` RPC 供 Go 侧读取 |
 | GUI 外 stdio 启动 | `desktop/mcp_bridge.go`（`WxTap.exe -mcp`） |

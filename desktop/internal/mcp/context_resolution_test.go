@@ -3,6 +3,7 @@ package mcp
 import (
 	"strings"
 	"testing"
+	"time"
 )
 
 // The two context probes the miniapp tools issue, matched by the exact text the
@@ -150,6 +151,10 @@ func TestDOMToolsTargetTheCurrentPageContext(t *testing.T) {
 // redirect guard on the tool's own navigation was intercepted and still
 // reported success.
 func TestNavigateSwitchTabGoesThroughThePageNavigator(t *testing.T) {
+	// 这条用例只关心分发路径；替身栈不会落向目标路由，把核验窗口缩到最小。
+	oldTimeout, oldPoll := navigationVerifyTimeout, navigationVerifyPoll
+	navigationVerifyTimeout, navigationVerifyPoll = 30*time.Millisecond, 5*time.Millisecond
+	defer func() { navigationVerifyTimeout, navigationVerifyPoll = oldTimeout, oldPoll }()
 	core := &recordingCore{}
 	failed, text := callTool(t, Deps{Core: core, AppBridge: fakeAppBridge{}}, "miniapp_navigate", `{"route":"pages/index/index","method":"switchTab"}`)
 	if failed {
@@ -159,6 +164,10 @@ func TestNavigateSwitchTabGoesThroughThePageNavigator(t *testing.T) {
 		if strings.Contains(expr, "wx.switchTab") {
 			t.Fatalf("switchTab 不该再直接求值 wx.switchTab: %s", expr)
 		}
+	}
+	// 回调说 ok 而栈没落向目标路由，必须如实回 ok:false 而不是照抄成功。
+	if !strings.Contains(text, `"ok":false`) {
+		t.Fatalf("栈未落地必须回 ok:false: %s", text)
 	}
 }
 

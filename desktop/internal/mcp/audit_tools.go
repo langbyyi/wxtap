@@ -51,10 +51,10 @@ func auditToolDefs() []toolDef {
 				"format": map[string]any{"type": "string", "enum": []string{"nuclei", "httpx", "json", "txt", "csv"}},
 				"kind":   str, "host": str,
 			}, "format")},
-		{Name: "traffic_curl", Description: "把一条已捕获流量记录渲染成 curl 命令行：bash（单引号转义，*nix）与 cmd（双引号转义，Windows）两个等价形式，-k 与重放客户端的「不校验 TLS」立场一致；头保持捕获时的原始大小写，体走 --data-raw。在最近 500 条记录里按 id 查找（更早的记录取不到），找不到回 {ok:false,error:\"记录不存在\"}",
-			InputSchema: schema(map[string]any{"id": str}, "id")},
-		{Name: "traffic_replay", Description: "重放一条已捕获的流量记录：以捕获时的原始方法、URL 与头对真实后端再发一次（走 GUI 设置里的 replayUpstreamProxy，不校验 TLS），响应体 ≤4KB 直接返回、超出截断并带 truncated:true——需要完整响应体时用 traffic_get_body 读捕获原文。与 wxapi_replay 的分工：那个在页内以小程序自身环境重放 wx 调用，这个在 WxTap 进程内按捕获原文重放 HTTP，适合验证「服务端认不认这份头」。在最近 500 条记录里按 id 查找，找不到回 {ok:false,error:\"记录不存在\"}。会向真实服务端发请求——只对被授权测试的环境使用",
-			InputSchema: schema(map[string]any{"id": str}, "id")},
+		{Name: "traffic_curl", Description: "把一条已捕获流量记录渲染成 curl 命令行：bash（单引号转义，*nix）与 cmd（双引号转义，Windows）两个等价形式，-k 与重放客户端的「不校验 TLS」立场一致；头保持捕获时的原始大小写，体走 --data-raw。敏感头的值与体里的身份证/手机号默认打码（redact:false 出原值）。在最近 500 条记录里按 id 查找（更早的记录取不到），找不到回 {ok:false,error:\"记录不存在\"}",
+			InputSchema: schema(map[string]any{"id": str, "redact": boolean}, "id")},
+		{Name: "traffic_replay", Description: "重放一条已捕获的流量记录：以捕获时的原始方法、URL 与头对真实后端再发一次（走 GUI 设置里的 replayUpstreamProxy，不校验 TLS），响应体 ≤4KB 直接返回、超出截断并带 truncated:true——实际发出的请求保持捕获原文，回给 agent 的响应体默认打码（redact:false 出原值）。与 wxapi_replay 的分工：那个在页内以小程序自身环境重放 wx 调用，这个在 WxTap 进程内按捕获原文重放 HTTP，适合验证「服务端认不认这份头」。在最近 500 条记录里按 id 查找，找不到回 {ok:false,error:\"记录不存在\"}。会向真实服务端发请求——只对被授权测试的环境使用",
+			InputSchema: schema(map[string]any{"id": str, "redact": boolean}, "id")},
 	}
 }
 
@@ -87,13 +87,45 @@ func (s *Server) callAuditTool(ctx context.Context, name string, raw json.RawMes
 		if id == "" {
 			return nil, fmt.Errorf("missing required argument \"id\"")
 		}
-		return s.appCall(ctx, "traffic.curl", map[string]any{"id": id})
+		result, err := s.appCall(ctx, "traffic.curl", map[string]any{"id": id})
+		if err != nil {
+			return nil, err
+		}
+		// 只打码回给 agent 的两行命令（敏感头的值、URL/body 里的身份证手机号）；
+		// 实际重放走的 IPC 报文保持捕获原文。
+		if redactEnabled(provided) {
+			if payload, ok := result.(map[string]any); ok {
+				if bash, ok := payload["bash"].(string); ok {
+					payload["bash"] = redactCurl(bash)
+				}
+				if cmdLine, ok := payload["cmd"].(string); ok {
+					payload["cmd"] = redactCurl(cmdLine)
+				}
+				payload["redacted"] = true
+			}
+		}
+		return result, nil
 	case "traffic_replay":
 		id, _ := provided["id"].(string)
 		if id == "" {
 			return nil, fmt.Errorf("missing required argument \"id\"")
 		}
-		return s.appCall(ctx, "traffic.replay", map[string]any{"id": id})
+		result, err := s.appCall(ctx, "traffic.replay", map[string]any{"id": id})
+		if err != nil {
+			return nil, err
+		}
+		// 实际发出的请求保持捕获原文；只有回给 agent 的响应体默认打码，
+		// redact:false 才出原值。
+		if redactEnabled(provided) {
+			if payload, ok := result.(map[string]any); ok {
+				if body, ok := payload["body"].(string); ok {
+					masked, _ := redactBody([]byte(body))
+					payload["body"] = string(masked)
+				}
+				payload["redacted"] = true
+			}
+		}
+		return result, nil
 	}
 	return nil, fmt.Errorf("unknown tool: %s", name)
 }
