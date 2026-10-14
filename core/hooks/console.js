@@ -30,10 +30,9 @@
   var hookState = {
     seq: 0,
     buffer: [],
-    // 缓冲溢出时被淘汰的累计条数（drain 响应里以 droppedRecords 报回，与
-    // wxapi.js 的 drain 契约一致）：没有这个数，页内丢的记录对所有下游都是
-    // 无声的缺口。clearHookedCalls() 把它随缓冲一起归零。
+    // 只累计读取游标之前的真实缺口，已读取记录的正常淘汰不算漏采。
     droppedRecords: 0,
+    accountedSeq: 0,
     hookedConsoles: [],
     originals: [],
     errorHooked: false,
@@ -49,12 +48,15 @@
     hookState.buffer.push({ seq: hookState.seq, record: record });
     while (hookState.buffer.length > DRAIN_BUFFER_CAPACITY) {
       hookState.buffer.shift();
-      hookState.droppedRecords += 1;
     }
     return hookState.seq;
   }
 
   function drainRecords(afterSeq, limit) {
+    var floor = Math.max(afterSeq, hookState.accountedSeq);
+    var evictedThrough = hookState.buffer.length ? hookState.buffer[0].seq - 1 : hookState.seq;
+    if (evictedThrough > floor) hookState.droppedRecords += evictedThrough - floor;
+    hookState.accountedSeq = Math.max(floor, evictedThrough);
     var out = [];
     var nextSeq = afterSeq;
     var hasMore = false;
@@ -415,11 +417,11 @@
     install: install,
     uninstallHook: uninstallHook,
     drain: drainRecords,
-    // 丢弃计数与缓冲一起归零（同 wxapi.js 的语义）：计数描述的是"缓冲里
-    // （曾经）有什么"，缓冲清空后旧读数就过期了。
+    // 清空是主动丢弃历史；计数归零，以当前序号为新基线。
     clearHookedCalls: function() {
       hookState.buffer = [];
       hookState.droppedRecords = 0;
+      hookState.accountedSeq = hookState.seq;
     }
   };
 })();

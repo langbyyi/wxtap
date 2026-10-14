@@ -2550,12 +2550,17 @@ func (a *App) registerConsoleHandlers(r *ipc.Router) {
 			if args.Tail > consoleCapacity {
 				args.Tail = consoleCapacity
 			}
-			records := a.consoleLog.Tail(args.Tail)
+			records, available, evicted := a.consoleLog.Tail(args.Tail)
 			nextSeq := int64(0)
 			if len(records) > 0 {
 				nextSeq = records[len(records)-1].Seq
 			}
-			return map[string]any{"records": records, "nextSeq": nextSeq, "hasMore": false, "dropped": 0}, nil
+			stats := a.consoleFeeder.Stats()
+			return map[string]any{
+				"records": records, "nextSeq": nextSeq, "hasMore": false, "dropped": 0,
+				"available": available, "evicted": evicted, "truncated": len(records) < available,
+				"pageDroppedRecords": stats.PageDroppedRecords, "pendingDropped": stats.Dropped,
+			}, nil
 		}
 		if args.Limit <= 0 {
 			args.Limit = 200

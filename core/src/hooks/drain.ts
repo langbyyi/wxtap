@@ -12,9 +12,9 @@
  * `seq > afterSeq` in sequence order; the caller acknowledges by passing the
  * returned `nextSeq` on the next drain, so acknowledged records are never
  * resent. When the buffer exceeds its capacity the oldest records are evicted
- * — memory stays bounded even if the consumer stops draining. Evictions are
- * counted (`dropped`), because an evicted capture is otherwise invisible: the
- * page hooks report the same number as `droppedRecords`/`droppedUpdates`.
+ * — memory stays bounded even if the consumer stops draining. Each drain
+ * counts unread sequence gaps (`dropped`); evicting already acknowledged
+ * entries is normal retention, not data loss. Retries do not recount gaps.
  *
  * `UpdateQueue` is the same protocol for the wxapi hook's second stream: a
  * record that settles *after* it was already drained (async success/fail
@@ -37,6 +37,7 @@ export type DrainPage<T> = {
 export class DrainQueue<T> {
   private nextSeqValue = 0;
   private droppedValue = 0;
+  private accountedSeq = 0;
   private readonly buffer: Array<DrainedRecord<T>> = [];
 
   constructor(private readonly capacity: number) {
@@ -46,8 +47,8 @@ export class DrainQueue<T> {
   }
 
   /**
-   * Cumulative evictions since construction. The page hooks expose the same
-   * number as drain()'s `droppedRecords`.
+   * Cumulative unread gaps observed by drain(). The page hooks expose the
+   * same number as `droppedRecords`.
    */
   get dropped(): number {
     return this.droppedValue;
@@ -58,7 +59,6 @@ export class DrainQueue<T> {
     this.buffer.push({ seq: this.nextSeqValue, item });
     while (this.buffer.length > this.capacity) {
       this.buffer.shift();
-      this.droppedValue += 1;
     }
     return this.nextSeqValue;
   }
@@ -70,6 +70,10 @@ export class DrainQueue<T> {
     if (!Number.isInteger(limit) || limit < 1) {
       throw new Error("limit must be a positive integer");
     }
+    const floor = Math.max(afterSeq, this.accountedSeq);
+    const evictedThrough = this.buffer[0]?.seq === undefined ? this.nextSeqValue : this.buffer[0].seq - 1;
+    this.droppedValue += Math.max(0, evictedThrough - floor);
+    this.accountedSeq = Math.max(floor, evictedThrough);
 
     const records: Array<DrainedRecord<T>> = [];
     let nextSeq = afterSeq;
@@ -108,6 +112,7 @@ export type UpdateDrainPage<T> = {
 export class UpdateQueue<T> {
   private nextSeqValue = 0;
   private droppedValue = 0;
+  private accountedSeq = 0;
   private readonly buffer: Array<DrainedUpdate<T>> = [];
 
   constructor(private readonly capacity: number) {
@@ -117,8 +122,8 @@ export class UpdateQueue<T> {
   }
 
   /**
-   * Cumulative evictions since construction. The page hooks expose the same
-   * number as drain()'s `droppedUpdates`.
+   * Cumulative unread gaps observed by drainUpdates(). The page hooks expose
+   * the same number as `droppedUpdates`.
    */
   get dropped(): number {
     return this.droppedValue;
@@ -129,7 +134,6 @@ export class UpdateQueue<T> {
     this.buffer.push({ seq: this.nextSeqValue, update });
     while (this.buffer.length > this.capacity) {
       this.buffer.shift();
-      this.droppedValue += 1;
     }
     return this.nextSeqValue;
   }
@@ -150,6 +154,10 @@ export class UpdateQueue<T> {
     if (limit === 0) {
       return { updates, nextUpdateSeq, hasMore };
     }
+    const floor = Math.max(afterUpdateSeq, this.accountedSeq);
+    const evictedThrough = this.buffer[0]?.seq === undefined ? this.nextSeqValue : this.buffer[0].seq - 1;
+    this.droppedValue += Math.max(0, evictedThrough - floor);
+    this.accountedSeq = Math.max(floor, evictedThrough);
     for (const update of this.buffer) {
       if (update.seq <= afterUpdateSeq) {
         continue;

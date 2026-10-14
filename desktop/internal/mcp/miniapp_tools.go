@@ -400,7 +400,11 @@ func (s *Server) callMiniappTool(ctx context.Context, name string, raw json.RawM
 			}
 			logs = append(logs, item)
 		}
-		return map[string]any{"logs": logs, "count": len(logs), "redacted": redacted}, nil
+		coverage := consoleCoverage(objectMap(result))
+		if truncated, exists := objectMap(result)["truncated"]; exists {
+			coverage["truncated"] = truncated
+		}
+		return map[string]any{"logs": logs, "count": len(logs), "redacted": redacted, "coverage": coverage}, nil
 	case "miniapp_get_info":
 		result, err := s.appCall(ctx, "navigator.pages", map[string]any{})
 		if err != nil {

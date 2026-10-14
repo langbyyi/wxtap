@@ -287,6 +287,86 @@ func TestCancelledWriteMarksConnectionDead(t *testing.T) {
 	}
 }
 
+// 排队期间到期的取消不得拆连接：写还没发出，管道是健康的。第一个调用被
+// 门控 writer 占住写闸停在写里，第二个带短超时的调用在排队中到期——它只拿
+// 自己的超时错误；放行之后连接照常工作。真正楔死的在途写走的是另一条
+// teardown 路（TestCancelledWriteMarksConnectionDead）。
+func TestCancelledWhileQueuedLeavesTheConnectionAlive(t *testing.T) {
+	gated := newGatedWriter()
+	pr, pw := io.Pipe()
+	defer pw.Close()
+	client := NewClient(pr, gated)
+	defer func() { _ = client.Close() }()
+
+	// 第一个调用占住写闸并停在门控写里。
+	parked := make(chan error, 1)
+	go func() {
+		parked <- client.Call(context.Background(), "engine.start", map[string]any{}, nil)
+	}()
+	time.Sleep(20 * time.Millisecond)
+
+	// 第二个调用的 ctx 在排队期间到期：它在写闸上等到放行为止，所以放进程里跑。
+	expired, cancel := context.WithTimeout(context.Background(), 10*time.Millisecond)
+	defer cancel()
+	queued := make(chan error, 1)
+	go func() {
+		queued <- client.Call(expired, "engine.status", map[string]any{}, nil)
+	}()
+
+	// 放行写：占位调用拿到应答，排队的调用拿到闸后才发现 ctx 已到期——
+	// 只许拿自己的超时错误，连接必须还活着。
+	gated.release()
+	pw.Write([]byte(`{"id":1,"result":{}}` + "\n"))
+	if err := <-parked; err != nil {
+		t.Fatalf("parked call: %v", err)
+	}
+	select {
+	case err := <-queued:
+		if err == nil {
+			t.Fatal("expected the queued call to fail with its own timeout")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("queued call never returned")
+	}
+	select {
+	case <-client.Done():
+		t.Fatal("a queue-expiry cancellation must not tear the connection down")
+	default:
+	}
+
+	// 后续调用照常完成（排队的调用消耗了 id 2，这是 id 3 的应答）。
+	go func() { pw.Write([]byte(`{"id":3,"result":{}}` + "\n")) }()
+	var result map[string]any
+	if err := client.Call(context.Background(), "engine.status", map[string]any{}, &result); err != nil {
+		t.Fatalf("post-release call: %v", err)
+	}
+}
+
+// gatedWriter blocks the first write until released, then lets every write
+// through — the queue-expiry test's healthy pipe.
+type gatedWriter struct {
+	gate      chan struct{}
+	closeOnce sync.Once
+}
+
+func newGatedWriter() *gatedWriter {
+	return &gatedWriter{gate: make(chan struct{})}
+}
+
+func (w *gatedWriter) Write(p []byte) (int, error) {
+	<-w.gate
+	return len(p), nil
+}
+
+func (w *gatedWriter) release() {
+	w.closeOnce.Do(func() { close(w.gate) })
+}
+
+func (w *gatedWriter) Close() error {
+	w.release()
+	return nil
+}
+
 func newBlockedWriter() io.WriteCloser {
 	return &blockedWriter{ready: make(chan struct{})}
 }

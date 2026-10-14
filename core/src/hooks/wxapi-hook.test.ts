@@ -628,7 +628,34 @@ describe("hooks/wxapi.js account identity", () => {
       expect(page.droppedUpdates).toBe(0);
     });
 
-    it("counts every evicted record and update exactly like the model queues", () => {
+    it("does not report acknowledged records or updates as lost", () => {
+      const { audit, wx } = harness();
+      audit.install();
+      let cursor = 0;
+      let updateCursor = 0;
+      let received = 0;
+      for (let index = 0; index < PAGE_RECORD_BUFFER_CAPACITY + 10; index += 1) {
+        wx.request({ url: `https://api.test/${index}`, success: () => undefined });
+        const page = audit.drain(cursor, 10, updateCursor, 10);
+        received += page.records.length;
+        cursor = page.nextSeq;
+        updateCursor = page.nextUpdateSeq;
+      }
+      expect(received).toBe(PAGE_RECORD_BUFFER_CAPACITY + 10);
+      const page = audit.drain(cursor, 10, updateCursor, 10);
+      expect(page.droppedRecords).toBe(0);
+      expect(page.droppedUpdates).toBe(0);
+      const replay = audit.drain(0, 10, 0, 10);
+      expect(replay.droppedRecords).toBe(0);
+      expect(replay.droppedUpdates).toBe(0);
+      audit.clearHookedCalls();
+      wx.request({ url: "https://api.test/after-clear", success: () => undefined });
+      const cleared = audit.drain(0, 10, 0, 10);
+      expect(cleared.droppedRecords).toBe(0);
+      expect(cleared.droppedUpdates).toBe(0);
+    });
+
+    it("counts unread record and update gaps exactly like the model queues", () => {
       const { audit, wx } = harness();
       audit.install();
 
@@ -642,6 +669,8 @@ describe("hooks/wxapi.js account identity", () => {
       }
 
       const page = audit.drain(0, PAGE_RECORD_BUFFER_CAPACITY * 2, 0, PAGE_UPDATE_BUFFER_CAPACITY * 2);
+      recordModel.drain(0, PAGE_RECORD_BUFFER_CAPACITY * 2);
+      updateModel.drainUpdates(0, PAGE_UPDATE_BUFFER_CAPACITY * 2);
       expect(page.droppedRecords).toBe(overflow);
       expect(page.droppedUpdates).toBe(overflow);
       // The counts are the model's, not a second hardcoded expectation.
@@ -691,10 +720,12 @@ describe("hooks/wxapi.js account identity", () => {
       expect(first.updates).toEqual([]);
       expect(first.nextUpdateSeq).toBe(0);
       expect(first.droppedRecords).toBe(overflow);
-      expect(first.droppedUpdates).toBe(overflow);
+      expect(first.droppedUpdates).toBe(0);
 
       // Acking resumes right after the acknowledged sequence.
       const second = audit.drain(first.nextSeq, 2, first.nextUpdateSeq, 2);
+      expect(second.droppedRecords).toBe(overflow);
+      expect(second.droppedUpdates).toBe(overflow);
       expect(second.records.map((entry) => entry.seq)).toEqual([overflow + 3, overflow + 4]);
       expect(second.updates.map((entry) => entry.seq)).toEqual([overflow + 1, overflow + 2]);
     });

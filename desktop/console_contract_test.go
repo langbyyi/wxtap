@@ -128,7 +128,10 @@ func TestConsoleListTailReturnsTheNewestRecords(t *testing.T) {
 	}
 	payload, _ := json.Marshal(result)
 	var decoded struct {
-		Records []struct {
+		Available int   `json:"available"`
+		Evicted   int64 `json:"evicted"`
+		Truncated bool  `json:"truncated"`
+		Records   []struct {
 			Seq    int64          `json:"seq"`
 			Record map[string]any `json:"record"`
 		} `json:"records"`
@@ -141,6 +144,24 @@ func TestConsoleListTailReturnsTheNewestRecords(t *testing.T) {
 	}
 	if decoded.Records[2].Record["text"] != float64(consoleCapacity+19) {
 		t.Fatalf("tail must end at the newest record: %s", payload)
+	}
+	if decoded.Available != consoleCapacity || decoded.Evicted != 20 || !decoded.Truncated {
+		t.Fatalf("tail must disclose retained history and evictions: %s", payload)
+	}
+	if _, err := app.router.Call(context.Background(), "console.clear", json.RawMessage(`{}`)); err != nil {
+		t.Fatal(err)
+	}
+	app.consoleLog.Append([]map[string]any{{"text": "after clear"}}, app.consoleLog.Epoch())
+	result, err = app.router.Call(context.Background(), "console.list", json.RawMessage(`{"tail":3}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	payload, _ = json.Marshal(result)
+	if err := json.Unmarshal(payload, &decoded); err != nil {
+		t.Fatal(err)
+	}
+	if decoded.Available != 1 || decoded.Evicted != 0 || decoded.Truncated {
+		t.Fatalf("clear must reset coverage without reporting cleared history as lost: %s", payload)
 	}
 }
 

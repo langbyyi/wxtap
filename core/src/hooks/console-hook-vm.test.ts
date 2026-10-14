@@ -54,6 +54,37 @@ function createHarness() {
 }
 
 describe("console hook (shipped core/hooks/console.js)", () => {
+  it("does not report already-read logs as lost when retention rotates", () => {
+    const { audit, fakeConsole } = createHarness();
+    audit.install();
+    let cursor = 0;
+    let received = 0;
+    for (let index = 0; index < 1200; index += 1) {
+      fakeConsole.log(`entry-${index}`);
+      const page = audit.drain(cursor, 10);
+      received += page.records.length;
+      cursor = page.nextSeq;
+    }
+    expect(received).toBe(1200);
+    expect(audit.drain(cursor, 10).droppedRecords).toBe(0);
+    expect(audit.drain(0, 10).droppedRecords).toBe(0);
+  });
+
+  it("counts only unread gaps once, including when a cursor is retried", () => {
+    const { audit, fakeConsole } = createHarness();
+    audit.install();
+    for (let index = 0; index < 1000; index += 1) fakeConsole.log(index);
+    const first = audit.drain(0, 200);
+    for (let index = 0; index < 300; index += 1) fakeConsole.log(index);
+    const next = audit.drain(first.nextSeq, 10);
+    expect(next.records[0].seq).toBe(301);
+    expect(next.droppedRecords).toBe(100);
+    expect(audit.drain(first.nextSeq, 10).droppedRecords).toBe(100);
+    audit.clearHookedCalls();
+    fakeConsole.log("after clear");
+    expect(audit.drain(0, 10).droppedRecords).toBe(0);
+  });
+
   it("captures each level with its text and the page appid", () => {
     const { audit, fakeConsole } = createHarness();
     expect(audit.install()).toMatchObject({ ok: true, hookedConsoles: 1, errorsHooked: true, appId: "wxconsole" });

@@ -33,8 +33,10 @@ desktop/ App (Go) ──► internal/api/ipc Router ──► 各域 handler
    - 记录身份 `rid = <apiType>-<appId>-<ts>-<seq>` **即** `traffic_records.id`（主键），页面钩子直接携带该值：因此「事件流 + `*.poll`」两条投递路径对页面而言是幂等的（同一 `rid` 只渲染一行），drain 后的补投递也不会产生第二行。
    - 容量关系是跨层不变量：**两个记录钩子**（`wxapi.js` / `cloud.js`）各带 5000 条记录缓冲与 5000 条更新缓冲；`console.js` 只有 1000 条记录缓冲、没有更新流，不在此等式内。shell 的重投递去重 FIFO `deliveredCapacity = 16384` 必须覆盖**单个钩子**的记录缓冲与更新缓冲之和（5000 + 5000 = 10000），两侧测试各自从一个钩子的源码解析这两个常量再断言（`hookfeeder_test.go` 读 `wxapi.js`，`cloud_contract_test.go` 读 `cloud.js`）——**并非**把两个钩子相加，`16384` 也不是按两个钩子之和取值的。
    - 事件按批投递（每 tick 每流最多一次、载荷为数组），`*.poll` 支持可选 `limit`（缺省 500、钳制 1..2000、响应恒为数组）；`*.stats` 暴露 `pending`/`dropped`（shell pending 溢出）与 `pageDroppedRecords`/`pageDroppedUpdates`（页面缓冲溢出，无法挽回），`traffic.stats` 把两者求和后给历史记录页。
+   - 页面丢失计数在 drain 时按确认游标与缓冲最早序号之间的未读缺口累计：已确认记录的正常淘汰不计入，重复读取不重复计数，清空以当前序号为新基线。记录流与更新流分别计算；`updateLimit:0` 不确认或统计更新流。
    - **采集不是连接的副作用**：`wxapi` / `cloud` 钩子由 `*.start` 安装（不在连接时预装），因此连接后的调用既不进页内缓冲也不入库；`*.stop` 顺序为 stop → 清页面缓冲 → 卸载钩子 → 清 shell pending，下次 `*.start` 只记录启用之后的调用。例外是**正在捕获**时 realm 重建：钩子会被重装并把 ack 归 0（新 realm 的 seq 从 1 重来）。`console` 相反，连接即采、常开；契约由 `desktop/capture_lifecycle_contract_test.go` 锁定。
 5. 后端事件经 Wails `EventsEmit` → 前端 `window.__onBackendEvent(...)`（bridge 透传）；Console 页按序号增量拉取 `console.list`，不叠加事件流，避免重复行；WxAPI / 云函数页因为记录带 `rid`，事件与 poll 双路并存也不会重复渲染。
+   - Console 前端保留 500 条、后端保留 1000 条，独立于 API 流量库。`miniapp_console_log` 返回最近 100 条并附 `coverage`：`available` 是后端保留条数，`evicted` 是清空后被淘汰的历史，`truncated` 表示本次样本少于保留历史，`pageDroppedRecords` / `pendingDropped` 分别表示页侧未读缺口 / 采集器待取缓冲溢出。`session_status.console` 返回同一健康信息；API 丢失计数为零不能证明 Console 日志完整。
 6. 页面 realm 重建（generation 变化）时 Go 会重装 Hook、丢弃注入登记，并重新注入标记为全局的用户脚本；`window.nav` 的注入缓存同时失效并重建。
 7. 暂停策略由 GUI `debugger.pausePolicy` 转发到 Core `cdp.pausePolicy`，仅写当前锁定连接；Core 直接确认 Debugger 指令，不依赖外部 DevTools 窗口。首次未确认时隐藏状态文字并提供恢复正常暂停，回执确认后才显示策略。
 8. H5 临时验证通过 `targets.probe` → `cdp.probeTarget` 读取页面信息并确认释放；常驻窗口走 `/devtools/h5/<clientId>/<targetId>` 与 `h5-sessions.ts` 的独立会话。每个窗口隔离命令 ID 与子会话消息，导航更新 URL/标题，关闭、目标销毁或来源变化时释放。H5 Network 仅在独立 DevTools 中展示，不写入 WxTap 流量库；独立 XWeb 尚未接入。

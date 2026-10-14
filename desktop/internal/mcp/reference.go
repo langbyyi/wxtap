@@ -40,7 +40,8 @@ hook_drain / hook_wait 返回的每条记录是 {seq, record}，落定更新是 
 ## 游标与丢失
 
 - records 按 seq 单调递增，drain 返回 nextSeq（下一页 afterSeq）与 hasMore。
-- 页内缓冲有界：读取不及时而被淘汰的记录永久丢失，数据库中亦不存在。该累计淘汰数只在 hook_stats 的 pageDroppedRecords / pageDroppedUpdates 中（session_status 的 capture 字段给出同一读数）。hook_drain 的返回只含 records / updates / nextSeq / nextUpdateSeq / hasMore，不含任何丢弃计数。hook_stats 的另一字段 dropped 含义不同：该批记录已进入 UI 与数据库，仅 poll 路径无法取回。两者互补、不可相加；结论必须说明丢失规模。
+- 页内缓冲有界：读取不及时而被淘汰的记录永久丢失，数据库中亦不存在。该累计未读缺口只在 hook_stats 的 pageDroppedRecords / pageDroppedUpdates 中（session_status 的 capture 字段给出同一读数）；已确认记录的正常淘汰不计入，重试不重复计数。hook_drain 的返回只含 records / updates / nextSeq / nextUpdateSeq / hasMore，不含任何丢弃计数。hook_stats 的另一字段 dropped 含义不同：该批记录已进入 UI 与数据库，仅 poll 路径无法取回。两者互补、不可相加；结论必须说明丢失规模。
+- Console 日志与 API 流量使用独立缓冲。miniapp_console_log 只回最近 100 条，coverage 中 available 为保留条数，evicted 为已淘汰历史，truncated 为样本截取，pageDroppedRecords / pendingDropped 为采集缺口。session_status.console 给出同一健康信息；元数据缺失表示未知，不能按零丢失处理。
 `,
 
 	"engine-errors": `# 引擎失败码与前置诊断

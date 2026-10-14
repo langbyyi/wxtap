@@ -1,10 +1,44 @@
 import { describe, expect, it } from "vitest";
 
-import { DrainQueue } from "./drain.js";
+import { DrainQueue, UpdateQueue } from "./drain.js";
 
 type Sample = { name: string };
 
 describe("DrainQueue", () => {
+  it("counts unread gaps rather than retention evictions", () => {
+    const queue = new DrainQueue<Sample>(3);
+    let cursor = 0;
+    for (let index = 0; index < 8; index += 1) {
+      queue.push({ name: `n${index}` });
+      cursor = queue.drain(cursor, 1).nextSeq;
+    }
+    queue.drain(cursor, 1);
+    expect(queue.dropped).toBe(0);
+    queue.drain(0, 1);
+    expect(queue.dropped).toBe(0);
+    for (let index = 0; index < 5; index += 1) queue.push({ name: `burst${index}` });
+    queue.drain(cursor, 1);
+    expect(queue.dropped).toBe(2);
+    queue.drain(cursor, 1);
+    expect(queue.dropped).toBe(2);
+  });
+
+  it("does not count update retention or acknowledge a disabled update read", () => {
+    const queue = new UpdateQueue<Sample>(3);
+    let cursor = 0;
+    for (let index = 0; index < 8; index += 1) {
+      queue.pushUpdate({ name: `n${index}` });
+      cursor = queue.drainUpdates(cursor, 1).nextUpdateSeq;
+    }
+    queue.drainUpdates(cursor, 1);
+    expect(queue.dropped).toBe(0);
+    for (let index = 0; index < 5; index += 1) queue.pushUpdate({ name: `burst${index}` });
+    expect(queue.drainUpdates(cursor, 0).nextUpdateSeq).toBe(cursor);
+    expect(queue.dropped).toBe(0);
+    queue.drainUpdates(cursor, 1);
+    expect(queue.dropped).toBe(2);
+  });
+
   it("assigns monotonically increasing sequence numbers", () => {
     const queue = new DrainQueue<Sample>(10);
     queue.push({ name: "a" });

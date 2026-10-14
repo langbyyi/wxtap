@@ -100,15 +100,16 @@ func (c *consoleLog) List(afterSeq int64, limit int) (records []consoleRecord, n
 	return out, nextSeq, hasMore, dropped
 }
 
-// Tail returns the newest limit records in sequence order. MCP's
+// Tail returns the newest limit records, retained count and retention evictions
+// since the last clear in one snapshot. MCP's
 // miniapp_console_log asks for "recent output", which a from-zero List cannot
 // express: once the ring is full it would return the oldest rows instead.
 // An empty ring answers an empty (non-nil) slice: the JSON contract is always
 // an array, never null.
-func (c *consoleLog) Tail(limit int) []consoleRecord {
+func (c *consoleLog) Tail(limit int) ([]consoleRecord, int, int64) {
 	out := make([]consoleRecord, 0)
 	if limit < 1 {
-		return out
+		return out, 0, 0
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -116,7 +117,7 @@ func (c *consoleLog) Tail(limit int) []consoleRecord {
 	if start < 0 {
 		start = 0
 	}
-	return append(out, c.records[start:]...)
+	return append(out, c.records[start:]...), len(c.records), c.seq - c.clearedThrough - int64(len(c.records))
 }
 
 // Clear drops every buffered record without resetting the sequence, and bumps

@@ -189,6 +189,12 @@ func (c *Client) removePending(id int64) {
 func (c *Client) writeLine(ctx context.Context, line []byte) error {
 	c.writeMu.Lock()
 	defer c.writeMu.Unlock()
+	// 拿到写闸后先复核取消：排队期间到期的 ctx 不拆连接——写还没发出，管道
+	// 是健康的，拆掉它等于一次调度停顿错杀整条引擎（CI 慢机实测发生过）。
+	// 只有真正在途的写才可能楔死，那条路保持下面的 teardown。
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	errc := make(chan error, 1)
 	go func() {
 		_, err := c.stdin.Write(append(line, '\n'))

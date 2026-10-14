@@ -11,8 +11,13 @@ import {
 } from "./wmpf-frida-runtime.js";
 import { findMacWmpfTarget } from "./darwin-target.js";
 import { CdpBridge, type Peer } from "../bridge/cdp-bridge.js";
+import { WmpfSocketServers } from "../bridge/websocket-servers.js";
 
 const temporaryRoots: string[] = [];
+
+// Keep real lifecycle coverage without competing with a running WxTap.
+const isolatedServers = (bridge: CdpBridge) =>
+  new WmpfSocketServers(bridge, { debugPort: 0, cdpPort: 0 });
 
 afterEach(async () => {
   await Promise.all(temporaryRoots.splice(0).map((root) => rm(root, { recursive: true, force: true })));
@@ -152,7 +157,7 @@ describe("WmpfFridaRuntime", () => {
         calls.push("unload");
       },
     });
-    const runtime = new WmpfFridaRuntime(root, async () => device);
+    const runtime = new WmpfFridaRuntime(root, async () => device, isolatedServers);
 
     await expect(runtime.start(62000)).resolves.toEqual({ frida: true, miniapp: false, devtools: false });
     expect(processQueries).toEqual([[{ scope: "metadata" }]]);
@@ -203,7 +208,7 @@ describe("WmpfFridaRuntime", () => {
       load: async () => await new Promise<void>((resolve) => { finishLoad = resolve; }),
       unload: async () => { calls.push("unload"); },
     });
-    const runtime = new WmpfFridaRuntime(root, async () => device);
+    const runtime = new WmpfFridaRuntime(root, async () => device, isolatedServers);
 
     const starting = runtime.start(62000);
     await vi.waitFor(() => expect(finishLoad).toBeTypeOf("function"));
@@ -306,7 +311,7 @@ describe("WmpfFridaRuntime", () => {
         },
       },
     });
-    const runtime = new WmpfFridaRuntime(root, async () => device);
+    const runtime = new WmpfFridaRuntime(root, async () => device, isolatedServers);
     try {
       await runtime.start(62000);
       expect(connect).toBeDefined();
@@ -403,7 +408,7 @@ describe("WmpfFridaRuntime (macOS platform)", () => {
       },
     };
 
-    const runtime = new WmpfFridaRuntime(root, async () => device, undefined, {
+    const runtime = new WmpfFridaRuntime(root, async () => device, isolatedServers, {
       configDir: "mac",
       // The shipped reader opens /Applications/.../Info.plist, which only exists
       // on a mac; the build number it yields is the address table's name.

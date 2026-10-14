@@ -25,8 +25,9 @@
  *   - updates: the settled outcome frame of every record, so the shell and the
  *     database learn the final status and the call's duration.
  *
- * Overload is observable (R12): both buffers count the entries they evict, and
- * drain() reports the cumulative counts as droppedRecords/droppedUpdates.
+ * Overload is observable (R12): each stream tracks its unread sequence gaps.
+ * drain() reports cumulative unread gaps as droppedRecords/droppedUpdates;
+ * acknowledged entries aging out of retention are not data loss.
  */
 (function() {
   var _global = typeof window !== 'undefined' ? window : (typeof globalThis !== 'undefined' ? globalThis : this);
@@ -52,11 +53,11 @@
     buffer: [],
     updateSeq: 0,
     updates: [],
-    // Cumulative evictions on each stream, since the hook was loaded or
-    // clearHookedCalls() ran. Reported by drain() so the shell can show an
-    // overload instead of silently losing the oldest captures.
+    // Cumulative unread gaps, measured against acknowledged cursors on drain.
     droppedRecords: 0,
-    droppedUpdates: 0
+    droppedUpdates: 0,
+    accountedSeq: 0,
+    accountedUpdateSeq: 0
   };
 
   function pushRecord(record) {
@@ -70,7 +71,6 @@
     drainState.buffer.push({ seq: seq, record: record });
     while (drainState.buffer.length > RECORD_BUFFER_CAPACITY) {
       drainState.buffer.shift();
-      drainState.droppedRecords += 1;
     }
     return seq;
   }
@@ -98,11 +98,14 @@
     drainState.updates.push({ seq: drainState.updateSeq, update: update });
     while (drainState.updates.length > UPDATE_BUFFER_CAPACITY) {
       drainState.updates.shift();
-      drainState.droppedUpdates += 1;
     }
   }
 
   function drainRecords(afterSeq, limit) {
+    var floor = Math.max(afterSeq, drainState.accountedSeq);
+    var evictedThrough = drainState.buffer.length ? drainState.buffer[0].seq - 1 : drainState.seq;
+    if (evictedThrough > floor) drainState.droppedRecords += evictedThrough - floor;
+    drainState.accountedSeq = Math.max(floor, evictedThrough);
     var out = [];
     var nextSeq = afterSeq;
     var hasMore = false;
@@ -124,6 +127,10 @@
     // and asks for records only). The cursor must stay put, otherwise those
     // updates would be silently skipped for a later caller that does want them.
     if (limit === 0) return { updates: out, nextUpdateSeq: nextUpdateSeq, hasMore: hasMore };
+    var floor = Math.max(afterUpdateSeq, drainState.accountedUpdateSeq);
+    var evictedThrough = drainState.updates.length ? drainState.updates[0].seq - 1 : drainState.updateSeq;
+    if (evictedThrough > floor) drainState.droppedUpdates += evictedThrough - floor;
+    drainState.accountedUpdateSeq = Math.max(floor, evictedThrough);
     for (var i = 0; i < drainState.updates.length; i++) {
       var entry = drainState.updates[i];
       if (entry.seq <= afterUpdateSeq) continue;
@@ -664,6 +671,8 @@
       drainState.updates = [];
       drainState.droppedRecords = 0;
       drainState.droppedUpdates = 0;
+      drainState.accountedSeq = drainState.seq;
+      drainState.accountedUpdateSeq = drainState.updateSeq;
     },
 
     getHookedApps: function() {
@@ -875,8 +884,7 @@
       nextSeq: records.nextSeq,
       nextUpdateSeq: updates.nextUpdateSeq,
       hasMore: records.hasMore,
-      // Cumulative evictions per stream, independent of the cursors above: a
-      // drain neither resets them nor is affected by them.
+      // Cumulative unread gaps; acknowledged retention is excluded.
       droppedRecords: drainState.droppedRecords,
       droppedUpdates: drainState.droppedUpdates
     };

@@ -26,10 +26,9 @@ type DrainPage struct {
 	NextSeq       int64           `json:"nextSeq"`
 	NextUpdateSeq int64           `json:"nextUpdateSeq"`
 	HasMore       bool            `json:"hasMore"`
-	// DroppedRecords / DroppedUpdates are the page-side buffers' cumulative
-	// eviction counts (R12): what the hook itself had to throw away because its
-	// own buffer overflowed, so the shell can never recover it. They are pure
-	// readings — the cursors above neither reset them nor are affected by them.
+	// DroppedRecords / DroppedUpdates are cumulative unread sequence gaps,
+	// measured by drain against its acknowledged cursors. Retention evictions
+	// of already acknowledged entries do not count as loss.
 	DroppedRecords int64 `json:"droppedRecords"`
 	DroppedUpdates int64 `json:"droppedUpdates"`
 }
@@ -56,7 +55,7 @@ type FeederStats struct {
 	Ack       int64 `json:"ack"`
 	UpdateAck int64 `json:"updateAck"`
 	// PageDroppedRecords / PageDroppedUpdates are the page-side buffers'
-	// cumulative evictions (R12), as last reported by a drain response. They
+	// cumulative unread gaps, as last reported by a drain response. They
 	// complement Dropped instead of overlapping it, but they do not mean the
 	// same thing. Dropped counts what the shell's pending buffer evicted: those
 	// records were already handed to the UI as capture events and already
@@ -151,7 +150,7 @@ type HookFeeder struct {
 	// WMPF builds that lock the console object) while still capturing part of
 	// the stream. Default false keeps the strict InstallReportOK behaviour.
 	acceptAnyInstallReport bool
-	// pageDroppedRecords / pageDroppedUpdates are the last cumulative eviction
+	// pageDroppedRecords / pageDroppedUpdates are the last cumulative unread-gap
 	// counts the page reported (R12). The shell only repeats the reading: the
 	// zeroing belongs to the page-side clearHookedCalls().
 	pageDroppedRecords int64

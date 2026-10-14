@@ -225,6 +225,14 @@ func (s *Server) assembleSnapshot(ctx context.Context, out map[string]any) (any,
 		}
 		out["capture"] = stats
 	}
+	// Console has separate buffers and loss counters; healthy wxapi/cloud stats
+	// cannot establish that the diagnostic logs are complete.
+	console, consoleErr := s.appCall(ctx, "console.list", map[string]any{"tail": 1})
+	if consoleErr != nil {
+		out["console"] = map[string]any{"error": consoleErr.Error()}
+	} else {
+		out["console"] = consoleCoverage(objectMap(console))
+	}
 
 	if s.deps.Traffic != nil {
 		if store, err := s.appCall(ctx, "traffic.stats", map[string]any{}); err == nil {
@@ -236,6 +244,18 @@ func (s *Server) assembleSnapshot(ctx context.Context, out map[string]any) (any,
 		out["ok"] = true
 	}
 	return out, nil
+}
+
+// Missing metadata stays missing when talking to an older desktop bridge;
+// absent counters must never imply zero loss.
+func consoleCoverage(snapshot map[string]any) map[string]any {
+	out := map[string]any{}
+	for _, key := range []string{"available", "evicted", "pageDroppedRecords", "pendingDropped"} {
+		if value, exists := snapshot[key]; exists {
+			out[key] = value
+		}
+	}
+	return out
 }
 
 // hookAuditObjects maps a record-hook name onto the page-side audit object the

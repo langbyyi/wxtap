@@ -20,8 +20,8 @@
  *     callback/promise landing after the record was drained still reaches the
  *     consumer instead of mutating an entry it has already read.
  *
- * Overload is observable (R12): both buffers count the entries they evict, and
- * drain() reports the cumulative counts as droppedRecords/droppedUpdates.
+ * drain() counts unread sequence gaps as droppedRecords/droppedUpdates.
+ * Evicting acknowledged entries from retention does not count as data loss.
  */
 (function() {
   if (window._wxApiCoreHooked) return;
@@ -46,11 +46,11 @@
     buffer: [],
     updateSeq: 0,
     updates: [],
-    // Cumulative evictions on each stream, since the hook was loaded or
-    // clearHookedCalls() ran. Reported by drain() so the shell can show an
-    // overload instead of silently losing the oldest captures.
+    // Cumulative unread gaps, measured against acknowledged cursors on drain.
     droppedRecords: 0,
     droppedUpdates: 0,
+    accountedSeq: 0,
+    accountedUpdateSeq: 0,
     hookedFrames: [],
     origApis: {},
     autoScanTimer: null,
@@ -68,7 +68,6 @@
     hookState.buffer.push({ seq: seq, record: record });
     while (hookState.buffer.length > RECORD_BUFFER_CAPACITY) {
       hookState.buffer.shift();
-      hookState.droppedRecords += 1;
     }
     return seq;
   }
@@ -96,11 +95,14 @@
     hookState.updates.push({ seq: hookState.updateSeq, update: update });
     while (hookState.updates.length > UPDATE_BUFFER_CAPACITY) {
       hookState.updates.shift();
-      hookState.droppedUpdates += 1;
     }
   }
 
   function drainRecords(afterSeq, limit) {
+    var floor = Math.max(afterSeq, hookState.accountedSeq);
+    var evictedThrough = hookState.buffer.length ? hookState.buffer[0].seq - 1 : hookState.seq;
+    if (evictedThrough > floor) hookState.droppedRecords += evictedThrough - floor;
+    hookState.accountedSeq = Math.max(floor, evictedThrough);
     var out = [];
     var nextSeq = afterSeq;
     var hasMore = false;
@@ -122,6 +124,10 @@
     // and asks for records only). The cursor must stay put, otherwise those
     // updates would be silently skipped for a later caller that does want them.
     if (limit === 0) return { updates: out, nextUpdateSeq: nextUpdateSeq, hasMore: hasMore };
+    var floor = Math.max(afterUpdateSeq, hookState.accountedUpdateSeq);
+    var evictedThrough = hookState.updates.length ? hookState.updates[0].seq - 1 : hookState.updateSeq;
+    if (evictedThrough > floor) hookState.droppedUpdates += evictedThrough - floor;
+    hookState.accountedUpdateSeq = Math.max(floor, evictedThrough);
     for (var i = 0; i < hookState.updates.length; i++) {
       var entry = hookState.updates[i];
       if (entry.seq <= afterUpdateSeq) continue;
@@ -510,8 +516,7 @@
         nextSeq: records.nextSeq,
         nextUpdateSeq: updates.nextUpdateSeq,
         hasMore: records.hasMore,
-        // Cumulative evictions per stream, independent of the cursors above: a
-        // drain neither resets them nor is affected by them.
+        // Cumulative unread gaps; acknowledged retention is excluded.
         droppedRecords: hookState.droppedRecords,
         droppedUpdates: hookState.droppedUpdates
       };
@@ -525,6 +530,8 @@
       hookState.updates = [];
       hookState.droppedRecords = 0;
       hookState.droppedUpdates = 0;
+      hookState.accountedSeq = hookState.seq;
+      hookState.accountedUpdateSeq = hookState.updateSeq;
     },
     replay: replay
   };
