@@ -1,7 +1,7 @@
 {
   "name": "wxtap-core",
   "private": true,
-  "version": "1.0.5",
+  "version": "1.0.0",
   "type": "module",
   "scripts": {
     "build": "tsc --project tsconfig.build.json --noEmit && esbuild src/cli.ts --bundle --platform=node --format=esm --external:frida --banner:js=\"import { createRequire } from 'node:module'; const require = createRequire(import.meta.url);\" --outfile=dist/cli.js",
