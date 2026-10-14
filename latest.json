@@ -1,15 +1,15 @@
 {
-  "version": "v1.0.4",
-  "notes": "完善微信小程序暂停控制和独立 H5 调试。\n\n- 暂停策略绑定锁定连接，收到回执后确认生效；支持跳过全部暂停、恢复正常暂停及重载后的重新确认。\n- H5 网页使用独立 DevTools 会话，支持只读验证、目标筛选、完整信息复制和失败后重试释放；排除微信容器根页面。\n- 页面导航后同步 URL 和标题，清除过期验证结果，隔离各窗口及 iframe/worker 子会话。\n- 统一固定导航头部与 Console 日志高度，精简调试界面状态文案。\n- 关闭应用时等待状态轮询退出，再排空后台任务，修正退出竞态。\n- 提交及发布产物排除真实测试目标、本地日志与数据库，构建时剥离本机路径。\n\n验证边界：本地自动化测试和 Windows 构建已通过；微信业务 H5、暂停控制完整生命周期及 macOS 微信实机场景仍待验收。H5 Network 当前在独立 DevTools 中查看，尚未汇入 WxTap 流量库。",
+  "version": "v1.0.5",
+  "notes": "排查工具升级：MCP 读取面默认脱敏登录态、证件与手机号（可关）；导航结果按真实页面栈核验并支持返回键；会话引导幂等、采集断线自动恢复；丢弃计数改按未读缺口统计，已读记录的正常轮转不再误报为丢失，Console 新增覆盖健康信息；修复坏上下文求值假成功与排队取消误断引擎连接；新增 miniapp_call、无障碍树定位点击、反编译页面索引与 H5 验证探针。",
   "platforms": {
     "darwin-arm64": {
       "assets": [
         {
-          "name": "WxTap-1.0.4-mac.tar.gz",
-          "size": 46466181,
-          "sha256": "baafbcad4e097f454751378759f60d3ba06cd60410bf7e3d076ab1ed2d8bdb1f",
+          "name": "WxTap-1.0.5-mac.tar.gz",
+          "size": 46506032,
+          "sha256": "265ebfed2bcdc8315742a7b24584ded1b9d77855d41dc2b9362a1fd50f659ab5",
           "urls": [
-            "https://github.com/langbyyi/wxtap/releases/download/v1.0.4/WxTap-1.0.4-mac.tar.gz"
+            "https://github.com/langbyyi/wxtap/releases/download/v1.0.5/WxTap-1.0.5-mac.tar.gz"
           ]
         }
       ]
@@ -17,19 +17,19 @@
     "windows-amd64": {
       "assets": [
         {
-          "name": "WxTap-1.0.4-a.tar.gz",
-          "size": 10431959,
-          "sha256": "a8a492b8e6b83b94c9caa9154f71cd7822a4449668eeafa7a2381ccf7a9130ad",
+          "name": "WxTap-1.0.5-a.tar.gz",
+          "size": 10466822,
+          "sha256": "0087851848198f38355f0869a97b9627bbf4474d296bd9d2668f49c0c74a714d",
           "urls": [
-            "https://github.com/langbyyi/wxtap/releases/download/v1.0.4/WxTap-1.0.4-a.tar.gz"
+            "https://github.com/langbyyi/wxtap/releases/download/v1.0.5/WxTap-1.0.5-a.tar.gz"
           ]
         },
         {
-          "name": "WxTap-1.0.4-b.tar.gz",
-          "size": 46273632,
-          "sha256": "652075c9fffe8ce0d44e302077d28a529dbd4a20f2cadbf9e93fee25a7bea94d",
+          "name": "WxTap-1.0.5-b.tar.gz",
+          "size": 46274788,
+          "sha256": "eeeb45ac08181c963e7c1029cd6ac82dcb5a00db7283dc1daa13205d4c73a39e",
           "urls": [
-            "https://github.com/langbyyi/wxtap/releases/download/v1.0.4/WxTap-1.0.4-b.tar.gz"
+            "https://github.com/langbyyi/wxtap/releases/download/v1.0.5/WxTap-1.0.5-b.tar.gz"
           ]
         }
       ]
